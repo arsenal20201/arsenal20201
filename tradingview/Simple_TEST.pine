@@ -1,0 +1,65 @@
+//@version=5
+// =====================================================================
+//  HWR SIMPLE — minimal test strategy to confirm visuals render.
+//  If you can SEE green/red triangles and the Entry/SL/TP lines with
+//  this, then the platform + workflow are fine and we move features
+//  back in one at a time. RSI(14) crossing 30/70 -> trades often.
+// =====================================================================
+strategy("HWR Simple TEST", overlay=true, initial_capital=1000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+rsiLen = input.int(14,  "RSI length")
+osLvl  = input.float(30,"Oversold (long)")
+obLvl  = input.float(70,"Overbought (short)")
+atrLen = input.int(14,  "ATR length")
+slMult = input.float(1.5,"Stop = ATR x")
+tpMult = input.float(2.0,"Target = ATR x")
+
+rsi = ta.rsi(close, rsiLen)
+atr = ta.atr(atrLen)
+
+longSig  = ta.crossover(rsi, osLvl)
+shortSig = ta.crossunder(rsi, obLvl)
+
+var float eEntry = na
+var float eSL    = na
+var float eTP    = na
+
+if longSig and strategy.position_size == 0
+    eEntry := close
+    eSL    := close - atr * slMult
+    eTP    := close + atr * tpMult
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long X", "Long", stop=eSL, limit=eTP)
+
+if shortSig and strategy.position_size == 0
+    eEntry := close
+    eSL    := close + atr * slMult
+    eTP    := close - atr * tpMult
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short X", "Short", stop=eSL, limit=eTP)
+
+inPos = strategy.position_size != 0
+
+// visible signal arrows
+plotshape(longSig,  "Long",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(shortSig, "Short", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// entry / stop / target lines while a trade is open
+plot(inPos ? eEntry : na, "Entry",  color=color.gray,  style=plot.style_linebr, linewidth=2)
+plot(inPos ? eSL    : na, "Stop",   color=color.red,   style=plot.style_linebr, linewidth=2)
+plot(inPos ? eTP    : na, "Target", color=color.green, style=plot.style_linebr, linewidth=2)
+
+// tiny info table
+var table t = table.new(position.top_right, 2, 4, frame_width=1, frame_color=color.gray)
+if barstate.islast
+    bg = color.new(color.black, 0)
+    table.cell(t, 0, 0, "Entry",  text_color=color.white, bgcolor=bg)
+    table.cell(t, 1, 0, inPos ? str.tostring(eEntry, format.mintick) : "-", text_color=color.white, bgcolor=bg)
+    table.cell(t, 0, 1, "Stop",   text_color=color.white, bgcolor=bg)
+    table.cell(t, 1, 1, inPos ? str.tostring(eSL, format.mintick) : "-",    text_color=color.white, bgcolor=bg)
+    table.cell(t, 0, 2, "Target", text_color=color.white, bgcolor=bg)
+    table.cell(t, 1, 2, inPos ? str.tostring(eTP, format.mintick) : "-",    text_color=color.white, bgcolor=bg)
+    table.cell(t, 0, 3, "Trades", text_color=color.white, bgcolor=bg)
+    table.cell(t, 1, 3, str.tostring(strategy.closedtrades),                text_color=color.white, bgcolor=bg)
+// =====================================================================
