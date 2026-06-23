@@ -18,20 +18,24 @@
 indicator("High Win-Rate Pro Signals", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=100)
 
 // ----------------------------- Inputs --------------------------------
-emaFastLen  = input.int(11,  "Fast EMA",  group="Signal")
-emaSlowLen  = input.int(34,  "Slow EMA",  group="Signal")
-emaTrendLen = input.int(200, "Trend EMA", group="Signal")
+sigMode     = input.string("Pullback (frequent)", "Signal engine", options=["Pullback (frequent)","EMA cross (trend flip)"], group="Signal", tooltip="Pullback = a signal on every pullback inside a trend (many per day). EMA cross = only when the trend flips (rare).")
+emaFastLen  = input.int(21,  "Fast EMA (trend)",  group="Signal")
+emaSlowLen  = input.int(50,  "Slow EMA (trend)",  group="Signal")
+emaTrendLen = input.int(200, "Trend EMA",         group="Signal")
+rsiLen      = input.int(14,  "RSI length",        group="Signal")
+rsiLong     = input.float(45,"RSI cross-up level (long pullback)",  group="Signal")
+rsiShort    = input.float(55,"RSI cross-down level (short pullback)",group="Signal")
 showRibbon  = input.bool(true, "Show EMA ribbon fill", group="Signal")
 
-useTrend   = input.bool(true, "Filter: trade with EMA-200 trend",  group="Filters")
-useMtf     = input.bool(true, "Filter: higher-timeframe agreement", group="Filters")
-useAdx     = input.bool(true, "Filter: ADX trend strength",         group="Filters")
+useTrend   = input.bool(true,  "Filter: trade with EMA-200 trend",  group="Filters")
+useMtf     = input.bool(false, "Filter: higher-timeframe agreement", group="Filters")
+useAdx     = input.bool(false, "Filter: ADX trend strength",         group="Filters")
 adxLen     = input.int(14,    "ADX length",                         group="Filters")
 adxMin     = input.float(20,  "Min ADX to trade",                   group="Filters")
-useExt     = input.bool(true, "Filter: skip overextended entries",  group="Filters")
-maxExtAtr  = input.float(1.8, "Max distance from fast EMA (ATR x)",  group="Filters")
+useExt     = input.bool(false, "Filter: skip overextended entries",  group="Filters")
+maxExtAtr  = input.float(2.5, "Max distance from fast EMA (ATR x)",  group="Filters")
 useConfirm = input.bool(false, "Confirm on bar close (ON = no repaint but signal shows at close; OFF = live signal that can repaint)",  group="Filters")
-cooldownBars = input.int(5,   "Cooldown bars between signals",      group="Filters")
+cooldownBars = input.int(2,   "Cooldown bars between signals",      group="Filters")
 
 atrLen     = input.int(14,  "ATR length",                  group="Risk")
 useSwing   = input.bool(true,"Structure (swing) stop",     group="Risk")
@@ -53,6 +57,7 @@ mtfTF3     = input.string("240", "MTF timeframe 3", options=["5","15","30","60",
 emaFast  = ta.ema(close, emaFastLen)
 emaSlow  = ta.ema(close, emaSlowLen)
 emaTrend = ta.ema(close, emaTrendLen)
+rsi      = ta.rsi(close, rsiLen)
 atr      = ta.atr(atrLen)
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 
@@ -63,8 +68,16 @@ b3 = request.security(syminfo.tickerid, mtfTF3, ta.ema(close, emaFastLen) > ta.e
 mtfBullCount = (b1 ? 1 : 0) + (b2 ? 1 : 0) + (b3 ? 1 : 0)
 
 // ----------------------------- Signal logic --------------------------
-baseLong  = ta.crossover(emaFast, emaSlow)
-baseShort = ta.crossunder(emaFast, emaSlow)
+// Two engines:
+//  Pullback (default, frequent): in a trend, fire each time RSI turns back up
+//  through a level (a pullback bounce) -> several signals per trend leg.
+//  EMA cross (rare): fire only when the fast/slow EMAs cross (trend flips).
+pullback = sigMode == "Pullback (frequent)"
+upTrend  = emaFast > emaSlow
+dnTrend  = emaFast < emaSlow
+
+baseLong  = pullback ? (upTrend and ta.crossover(rsi, rsiLong))  : ta.crossover(emaFast, emaSlow)
+baseShort = pullback ? (dnTrend and ta.crossunder(rsi, rsiShort)) : ta.crossunder(emaFast, emaSlow)
 
 trendLongOk  = not useTrend or close > emaTrend
 trendShortOk = not useTrend or close < emaTrend
