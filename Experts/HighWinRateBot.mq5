@@ -2,14 +2,15 @@
 //|                                              HighWinRateBot.mq5   |
 //|             High Win-Rate Trend-Pullback EA for MetaTrader 5      |
 //|                                                                  |
-//|  Strategy:  Trade only WITH the higher-trend, enter on RSI       |
-//|             pullbacks into value, confirmed by a momentum turn.  |
-//|             ATR-based stops/targets keep risk:reward consistent. |
+//|  Strategy:  Trade only WITH the higher-trend (top-down), enter   |
+//|             on RSI pullbacks into value, confirmed by a momentum |
+//|             turn. ATR-based stops/targets keep risk:reward       |
+//|             consistent and skip dead, low-volatility markets.    |
 //|                                                                  |
 //|  Risk mgmt: % equity risk per trade (auto lot sizing), daily     |
 //|             loss limit, daily profit lock, max positions, max    |
-//|             trades/day, spread filter, session filter,           |
-//|             break-even + ATR trailing stop.                      |
+//|             trades/day, spread filter, session filter, partial   |
+//|             take-profit (scale-out), break-even + ATR trailing.  |
 //|                                                                  |
 //|  NOTE: Educational tool. Always forward-test on a DEMO account   |
 //|        before risking real capital. Past performance does not    |
@@ -17,7 +18,7 @@
 //+------------------------------------------------------------------+
 #property copyright "HighWinRateBot"
 #property link      "https://github.com/arsenal20201/arsenal20201"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <HWRBot/SignalEngine.mqh>
@@ -34,10 +35,17 @@ input double InpRsiBuyZone             = 40.0;         // RSI pullback zone for 
 input double InpRsiSellZone            = 60.0;         // RSI pullback zone for shorts
 input int    InpAtrPeriod              = 14;           // ATR period
 
+//--- Higher-timeframe trend filter -----------------------------------
+input group "=== Higher-Timeframe Filter ==="
+input bool   InpUseHtfFilter           = true;         // Require higher-TF trend agreement
+input ENUM_TIMEFRAMES InpHtfTimeframe  = PERIOD_H1;    // Higher timeframe
+input int    InpHtfEmaPeriod           = 200;          // Higher-TF EMA period
+
 //--- Stop / target ---------------------------------------------------
 input group "=== Stops & Targets ==="
 input double InpAtrSlMult              = 1.5;          // Stop-loss = ATR x this
 input double InpRewardRiskRatio        = 1.5;          // Take-profit = R:R x risk
+input int    InpMinAtrPoints           = 0;            // Min ATR in points to trade (0=off)
 
 //--- Risk management -------------------------------------------------
 input group "=== Risk Management ==="
@@ -56,6 +64,9 @@ input int    InpSessionEndHour         = 20;           // Session end hour
 
 //--- Trade management ------------------------------------------------
 input group "=== Trade Management ==="
+input bool   InpUsePartialTP           = true;         // Scale out partial at first target
+input double InpPartialTriggerR        = 1.0;          // Take partial after this many R
+input double InpPartialPercent         = 50.0;         // % of position to close at partial
 input bool   InpUseBreakEven           = true;         // Enable break-even
 input double InpBreakEvenTriggerR      = 1.0;          // Move to BE after this many R profit
 input double InpBreakEvenLockPoints    = 20;           // Points locked beyond entry at BE
@@ -78,7 +89,6 @@ datetime       g_lastBarTime = 0;
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   //--- basic input sanity checks
    if(InpEmaFast>=InpEmaSlow)
      {
       Print("Init error: Fast EMA period must be smaller than Slow EMA period");
@@ -94,9 +104,15 @@ int OnInit()
       Print("Init error: ATR SL multiple and R:R ratio must be positive");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpUsePartialTP && (InpPartialPercent<=0.0 || InpPartialPercent>=100.0))
+     {
+      Print("Init error: Partial percent must be between 0 and 100 (exclusive)");
+      return INIT_PARAMETERS_INCORRECT;
+     }
 
    if(!g_signal.Init(_Symbol,InpTimeframe,InpEmaFast,InpEmaSlow,
-                     InpRsiPeriod,InpRsiBuyZone,InpRsiSellZone,InpAtrPeriod))
+                     InpRsiPeriod,InpRsiBuyZone,InpRsiSellZone,InpAtrPeriod,
+                     InpUseHtfFilter,InpHtfTimeframe,InpHtfEmaPeriod))
       return INIT_FAILED;
 
    g_risk.Init(_Symbol,InpMagicNumber,InpRiskPercent,InpMaxDailyLossPct,
@@ -104,10 +120,11 @@ int OnInit()
                InpMaxSpreadPoints,InpUseSession,InpSessionStartHour,InpSessionEndHour);
 
    g_trade.Init(_Symbol,InpMagicNumber,InpSlippagePoints,
+                InpUsePartialTP,InpPartialTriggerR,InpPartialPercent,
                 InpUseBreakEven,InpBreakEvenTriggerR,InpBreakEvenLockPoints,
                 InpUseTrailing,InpTrailAtrMult,InpTrailStartR);
 
-   Print("HighWinRateBot initialized on ",_Symbol," ",EnumToString(InpTimeframe));
+   Print("HighWinRateBot v1.10 initialized on ",_Symbol," ",EnumToString(InpTimeframe));
    return INIT_SUCCEEDED;
   }
 
@@ -117,8 +134,6 @@ void OnDeinit(const int reason)
    g_signal.Deinit();
   }
 
-//+------------------------------------------------------------------+
-//| New-bar detector                                                 |
 //+------------------------------------------------------------------+
 bool IsNewBar()
   {
@@ -134,7 +149,7 @@ bool IsNewBar()
 //+------------------------------------------------------------------+
 void OnTick()
   {
-   //--- manage live trades on every tick (trailing/break-even)
+   //--- manage live trades on every tick (partial/break-even/trailing)
    double atr=g_signal.GetATR(1);
    g_trade.ManageOpenPositions(atr);
 
@@ -154,6 +169,10 @@ void OnTick()
       return;
 
    if(atr<=0.0)
+      return;
+
+   //--- volatility floor: skip dead markets
+   if(InpMinAtrPoints>0 && (atr/_Point)<InpMinAtrPoints)
       return;
 
    //--- build SL/TP from ATR and intended R:R

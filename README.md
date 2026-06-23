@@ -17,8 +17,12 @@ capital with hard daily limits and dynamic trade management.
 
 High win-rate systems share three traits: they only trade in the direction of
 the dominant trend, they enter on pullbacks instead of chasing, and they cut
-risk aggressively. This EA encodes exactly that.
+risk aggressively. This EA encodes exactly that, top-down.
 
+0. **Higher-timeframe bias** (optional, on by default) — A higher-TF EMA
+   (default **H1 EMA 200**) must agree with the trade direction before anything
+   else is considered. This is the top-down filter desks use to avoid
+   counter-trend traps.
 1. **Trend filter** — A slow EMA (default **EMA 200**) defines the only side we
    may trade. Price above it → longs only. Price below it → shorts only. We never
    fight the trend.
@@ -29,16 +33,22 @@ risk aggressively. This EA encodes exactly that.
 3. **Momentum confirmation** — RSI must turn back in the trend direction on the
    most recent *closed* bar. That turn is the entry trigger, so we enter as the
    pullback resumes into the trend.
+4. **Volatility floor** (optional) — An ATR minimum skips dead, low-range
+   markets where the edge breaks down.
 
 Stops and targets are **ATR-based**, so they adapt to each instrument's
 volatility and keep the risk:reward ratio consistent.
 
 ```
-Entry (LONG):  close > EMA200  AND  EMA50 > EMA200
+Entry (LONG):  H1 close > H1 EMA200            (higher-TF bias)
+               AND close > EMA200 AND EMA50 > EMA200
                AND RSI dipped <= 40 on the prior bar
                AND RSI is now turning back up
 SL  = entry - ATR * 1.5
 TP  = entry + (SL distance * RewardRiskRatio)
+
+Lifecycle:     +1R -> close 50%, move stop to break-even
+               then trail the runner by ATR * 2.0
 ```
 
 Shorts are the mirror image.
@@ -58,8 +68,9 @@ Every layer below is configurable from the EA inputs:
 | **Max trades per day** | 5 | Prevents over-trading. |
 | **Spread filter** | 30 pts | Rejects entries when spread is abnormally wide. |
 | **Session filter** | off | Optionally trade only within chosen server hours. |
+| **Partial take-profit** | on | Closes 50% at 1R and moves the rest to break-even — banks profit early and lifts the win rate. |
 | **Break-even** | on | Moves SL to entry (+lock) after price runs 1R in profit — turns a winner into a risk-free trade. |
-| **ATR trailing stop** | on | Trails the stop by an ATR multiple after 1.5R to ride extended moves. |
+| **ATR trailing stop** | on | Trails the stop by an ATR multiple after 1.5R to ride the runner. |
 
 Position size is derived from real broker tick value/size, so it is correct on
 forex, indices, metals, and crypto CFDs alike.
