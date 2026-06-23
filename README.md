@@ -6,12 +6,15 @@ the way a disciplined trader actually operates: trade *with* the higher trend,
 buy pullbacks into value (not extended moves), confirm momentum, and protect
 capital with hard daily limits and dynamic trade management.
 
-> **v2 update** — reworked to fix three real backtest weaknesses (too many
-> stop-outs, chop-driven false entries, missed good trades): added an **ADX/DMI
-> trend-strength gate**, **slow-EMA slope filter**, a **real pullback-to-value**
-> requirement (price must tag the fast-EMA zone *and* RSI dip into value), a
-> **confirmation candle**, **structure-based (swing) stops**, and a
-> **consecutive-loss cooldown**. See `docs/STRATEGY.md`.
+> **v3 update** — over-filtering (v2) entered late and missed moves, so v3
+> switches to a cleaner, genuinely high-win-rate style: **RSI mean reversion in
+> the direction of the trend** — buy oversold dips in an uptrend, sell overbought
+> rips in a downtrend (short-period RSI cross + trend EMA). Optional gates
+> (higher-TF, ADX, confirm candle) are **off by default**. Kept: structure-based
+> swing stops, %-risk sizing, daily loss/profit guardrails, consecutive-loss
+> cooldown, scale-out partial TP, break-even, ATR trailing. The **TradingView
+> version adds an on-chart dashboard** drawing entry / stop / targets plus a live
+> info table; MT5 draws each position's entry/SL/TP natively.
 
 > ⚠️ **Disclaimer:** This is an educational/automation tool, not financial advice.
 > No strategy has a guaranteed win rate. **Always forward-test on a DEMO account

@@ -1,21 +1,21 @@
 //+------------------------------------------------------------------+
 //|                                              HighWinRateBot.mq5   |
-//|          High Win-Rate Trend-Pullback EA for MetaTrader 5  (v2)   |
+//|        High Win-Rate RSI Mean-Reversion EA for MetaTrader 5 (v3)  |
 //|                                                                  |
-//|  v2 reworks the entry to cut chop-driven false trades and        |
-//|  premature stop-outs: ADX/DMI trend-strength gate, slow-EMA      |
-//|  slope filter, real pullback-to-value (price tags the fast-EMA   |
-//|  zone + RSI dips into value), "not overextended" guard, a        |
-//|  confirmation candle, structure-based (swing) stops, and a       |
-//|  consecutive-loss cooldown. Risk: %-equity sizing, daily loss    |
-//|  limit, profit lock, max positions/trades, spread + session      |
-//|  filters, scale-out partial TP, break-even, ATR trailing.        |
+//|  v3 drops the over-filtered v2 approach for a clean, proven      |
+//|  high-win-rate style: buy oversold dips in an uptrend / sell     |
+//|  overbought rips in a downtrend (short-period RSI cross + trend  |
+//|  EMA). Optional gates (HTF, ADX, confirm candle) default OFF.    |
+//|  Risk: structure-based stops, %-equity sizing, daily loss limit, |
+//|  profit lock, max positions/trades, spread + session filters,    |
+//|  consecutive-loss cooldown, scale-out partial TP, break-even,    |
+//|  ATR trailing. MT5 natively draws each position's entry/SL/TP.   |
 //|                                                                  |
 //|  NOTE: Educational tool. Forward-test on DEMO before going live. |
 //+------------------------------------------------------------------+
 #property copyright "HighWinRateBot"
 #property link      "https://github.com/arsenal20201/arsenal20201"
-#property version   "2.00"
+#property version   "3.00"
 #property strict
 
 #include <HWRBot/SignalEngine.mqh>
@@ -23,41 +23,33 @@
 #include <HWRBot/TradeManager.mqh>
 
 //--- Strategy core ---------------------------------------------------
-input group "=== Strategy ==="
+input group "=== Strategy (RSI mean reversion) ==="
 input ENUM_TIMEFRAMES InpTimeframe     = PERIOD_M15;   // Working timeframe
-input int    InpEmaFast                = 50;           // Fast EMA (swing)
-input int    InpEmaSlow                = 200;          // Slow EMA (trend filter)
-input int    InpRsiPeriod              = 14;           // RSI period
-input double InpRsiBuyZone             = 45.0;         // RSI pullback zone for longs
-input double InpRsiSellZone            = 55.0;         // RSI pullback zone for shorts
+input int    InpRsiPeriod              = 3;            // RSI period (short = mean reversion)
+input double InpRsiOversold            = 15.0;         // Oversold level (long entries)
+input double InpRsiOverbought          = 85.0;         // Overbought level (short entries)
+input bool   InpUseTrend               = true;         // Trade only with the trend EMA
+input int    InpTrendEmaPeriod         = 200;          // Trend EMA period
 input int    InpAtrPeriod              = 14;           // ATR period
 
-//--- Trend quality filters ------------------------------------------
-input group "=== Trend Quality ==="
-input bool   InpUseHtfFilter           = true;         // Require higher-TF trend agreement
-input ENUM_TIMEFRAMES InpHtfTimeframe  = PERIOD_H1;    // Higher timeframe
+//--- Optional filters (default OFF) ---------------------------------
+input group "=== Optional Filters ==="
+input bool   InpUseHtfFilter           = false;        // Require higher-TF trend agreement
+input ENUM_TIMEFRAMES InpHtfTimeframe  = PERIOD_H4;    // Higher timeframe
 input int    InpHtfEmaPeriod           = 200;          // Higher-TF EMA period
-input bool   InpUseAdx                 = true;         // Require ADX trend strength
+input bool   InpUseAdx                 = false;        // Require ADX trend strength
 input int    InpAdxPeriod              = 14;           // ADX / DMI period
-input double InpAdxMin                 = 22.0;         // Min ADX to trade
-input bool   InpUseSlope               = true;         // Require slow-EMA slope agreement
-input int    InpSlopeLen               = 5;            // Slope lookback (bars)
-
-//--- Pullback & confirmation ----------------------------------------
-input group "=== Pullback & Confirmation ==="
-input int    InpPullLookback           = 6;            // Pullback lookback (bars)
-input double InpPullTolAtr             = 0.5;          // EMA-tag tolerance (ATR x)
-input bool   InpConfirmBar             = true;         // Require confirmation candle vs EMA
-input double InpMaxExtAtr              = 2.0;          // Max distance from fast EMA (ATR x)
+input double InpAdxMin                 = 18.0;         // Min ADX to trade
+input bool   InpConfirmBar             = false;        // Require confirmation candle
 
 //--- Stops & targets ------------------------------------------------
 input group "=== Stops & Targets ==="
 input bool   InpUseSwingStop           = true;         // Structure (swing) stop
 input int    InpSwingLook              = 10;           // Swing lookback (bars)
 input double InpStopBufAtr             = 0.3;          // Stop buffer beyond swing (ATR x)
-input double InpAtrSlMult              = 1.2;          // Min stop = ATR x
+input double InpAtrSlMult              = 1.5;          // Min stop = ATR x
 input double InpMaxStopAtr             = 3.5;          // Max stop = ATR x
-input double InpRewardRiskRatio        = 1.8;          // Take-profit R:R
+input double InpRewardRiskRatio        = 1.5;          // Take-profit R:R
 input int    InpMinAtrPoints           = 0;            // Min ATR in points to trade (0=off)
 
 //--- Risk management -------------------------------------------------
@@ -103,8 +95,8 @@ datetime       g_lastBarTime = 0;
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   if(InpEmaFast>=InpEmaSlow)
-     { Print("Init error: Fast EMA must be smaller than Slow EMA"); return INIT_PARAMETERS_INCORRECT; }
+   if(InpRsiOversold>=InpRsiOverbought)
+     { Print("Init error: Oversold level must be below Overbought level"); return INIT_PARAMETERS_INCORRECT; }
    if(InpRiskPercent<=0.0 || InpRiskPercent>20.0)
      { Print("Init error: Risk percent should be in (0, 20]"); return INIT_PARAMETERS_INCORRECT; }
    if(InpAtrSlMult<=0.0 || InpRewardRiskRatio<=0.0 || InpMaxStopAtr<InpAtrSlMult)
@@ -112,13 +104,12 @@ int OnInit()
    if(InpUsePartialTP && (InpPartialPercent<=0.0 || InpPartialPercent>=100.0))
      { Print("Init error: Partial percent must be between 0 and 100"); return INIT_PARAMETERS_INCORRECT; }
 
-   if(!g_signal.Init(_Symbol,InpTimeframe,InpEmaFast,InpEmaSlow,
-                     InpRsiPeriod,InpRsiBuyZone,InpRsiSellZone,InpAtrPeriod,
+   if(!g_signal.Init(_Symbol,InpTimeframe,
+                     InpRsiPeriod,InpRsiOversold,InpRsiOverbought,InpAtrPeriod,
+                     InpUseTrend,InpTrendEmaPeriod,
                      InpUseHtfFilter,InpHtfTimeframe,InpHtfEmaPeriod,
                      InpUseAdx,InpAdxPeriod,InpAdxMin,
-                     InpUseSlope,InpSlopeLen,
-                     InpPullLookback,InpPullTolAtr,
-                     InpConfirmBar,InpMaxExtAtr,
+                     InpConfirmBar,
                      InpUseSwingStop,InpSwingLook,InpStopBufAtr,
                      InpAtrSlMult,InpMaxStopAtr))
       return INIT_FAILED;
@@ -133,7 +124,7 @@ int OnInit()
                 InpUseBreakEven,InpBreakEvenTriggerR,InpBreakEvenLockPoints,
                 InpUseTrailing,InpTrailAtrMult,InpTrailStartR);
 
-   Print("HighWinRateBot v2.00 initialized on ",_Symbol," ",EnumToString(InpTimeframe));
+   Print("HighWinRateBot v3.00 initialized on ",_Symbol," ",EnumToString(InpTimeframe));
    return INIT_SUCCEEDED;
   }
 
