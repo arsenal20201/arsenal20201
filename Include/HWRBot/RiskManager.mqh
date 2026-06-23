@@ -31,11 +31,13 @@ private:
    bool              m_useSession;         // enable time-of-day filter
    int               m_startHour;          // session start (server time)
    int               m_endHour;            // session end (server time)
+   int               m_maxConsLoss;        // cooldown after N losses (0=off)
 
    //--- daily tracking
    datetime          m_dayStart;           // start of current trading day
    double            m_dayStartEquity;     // equity at day start
    int               m_tradesToday;        // trades opened today
+   int               m_consLosses;         // current consecutive-loss streak
 
    //--- helpers
    void              ResetDayIfNeeded();
@@ -46,11 +48,13 @@ public:
                           const double riskPct,const double maxDailyLossPct,
                           const double dailyProfitTgtPct,const int maxPos,
                           const int maxTradesDay,const int maxSpread,
-                          const bool useSession,const int startHour,const int endHour);
+                          const bool useSession,const int startHour,const int endHour,
+                          const int maxConsLoss);
 
    //--- gatekeeping
    bool              CanOpenNewTrade(string &reason);
    void              RegisterTradeOpened(void);
+   void              RegisterTradeClosed(const double profit);
 
    //--- sizing
    double            CalcLotSize(const double slPriceDistance);
@@ -75,9 +79,11 @@ CRiskManager::CRiskManager(void)
    m_useSession       = false;
    m_startHour        = 0;
    m_endHour          = 24;
+   m_maxConsLoss      = 0;
    m_dayStart         = 0;
    m_dayStartEquity   = 0;
    m_tradesToday      = 0;
+   m_consLosses       = 0;
   }
 
 //+------------------------------------------------------------------+
@@ -85,7 +91,8 @@ void CRiskManager::Init(const string symbol,const long magic,
                         const double riskPct,const double maxDailyLossPct,
                         const double dailyProfitTgtPct,const int maxPos,
                         const int maxTradesDay,const int maxSpread,
-                        const bool useSession,const int startHour,const int endHour)
+                        const bool useSession,const int startHour,const int endHour,
+                        const int maxConsLoss)
   {
    m_symbol            = symbol;
    m_magic             = magic;
@@ -98,6 +105,7 @@ void CRiskManager::Init(const string symbol,const long magic,
    m_useSession        = useSession;
    m_startHour         = startHour;
    m_endHour           = endHour;
+   m_maxConsLoss       = maxConsLoss;
 
    m_dayStartEquity    = AccountInfoDouble(ACCOUNT_EQUITY);
    MqlDateTime dt;
@@ -105,6 +113,7 @@ void CRiskManager::Init(const string symbol,const long magic,
    dt.hour=0; dt.min=0; dt.sec=0;
    m_dayStart          = StructToTime(dt);
    m_tradesToday       = 0;
+   m_consLosses        = 0;
   }
 
 //+------------------------------------------------------------------+
@@ -121,6 +130,7 @@ void CRiskManager::ResetDayIfNeeded(void)
       m_dayStart       = today;
       m_dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
       m_tradesToday    = 0;
+      m_consLosses     = 0;   // streak resets with the new day
      }
   }
 
@@ -179,6 +189,13 @@ bool CRiskManager::CanOpenNewTrade(string &reason)
       return false;
      }
 
+   //--- consecutive-loss cooldown (caps drawdown from losing streaks)
+   if(m_maxConsLoss>0 && m_consLosses>=m_maxConsLoss)
+     {
+      reason=StringFormat("Cooldown: %d consecutive losses",m_consLosses);
+      return false;
+     }
+
    //--- concurrent positions cap
    if(CountOwnPositions()>=m_maxPositions)
      {
@@ -220,6 +237,15 @@ void CRiskManager::RegisterTradeOpened(void)
   {
    ResetDayIfNeeded();
    m_tradesToday++;
+  }
+
+//+------------------------------------------------------------------+
+//| Update the consecutive-loss streak when one of our trades closes |
+//+------------------------------------------------------------------+
+void CRiskManager::RegisterTradeClosed(const double profit)
+  {
+   if(profit<0.0) m_consLosses++;
+   else           m_consLosses=0;   // any win/scratch resets the streak
   }
 
 //+------------------------------------------------------------------+

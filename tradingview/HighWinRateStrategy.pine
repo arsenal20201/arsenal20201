@@ -1,20 +1,26 @@
 //@version=5
 // =====================================================================
-//  High Win-Rate Trend-Pullback  —  TradingView port of the MT5 EA
+//  High Win-Rate Trend-Pullback  v2  —  TradingView strategy
 //  ---------------------------------------------------------------------
-//  Strategy: trade only WITH the higher-timeframe trend, enter on RSI
-//  pullbacks into value confirmed by a momentum turn. ATR-based stops
-//  and targets, scale-out partial TP, break-even and ATR trailing stop,
-//  plus %-risk position sizing and daily loss/profit guardrails.
+//  v2 is a professional rework that targets the three weaknesses found
+//  in v1 backtests: too many SL hits, chop-driven false entries, and
+//  missed good trades. Changes:
+//    * ADX / DMI trend-strength gate (no trading in chop)
+//    * EMA-slope filter + "not overextended" guard
+//    * real pullback-to-value: price must tag the fast-EMA zone AND RSI
+//      must have dipped into value within a lookback
+//    * confirmation candle: enter on a close back through the fast EMA,
+//      not a single-bar RSI flicker
+//    * structure-based stop beyond the recent swing (+ATR buffer),
+//      clamped to a sane min/max -> fewer noise stop-outs
+//    * consecutive-loss cooldown to cap drawdown
+//  Kept from v1: HTF trend filter, ATR/R:R targets, scale-out partial TP,
+//  break-even, ATR trailing, %-risk sizing, daily loss/profit guardrails.
 //
-//  This mirrors HighWinRateBot.mq5. Some MT5-only concepts (broker spread,
-//  server fill modes) don't exist on TradingView and are omitted.
-//
-//  HOW TO USE: paste into TradingView Pine Editor -> Add to chart ->
-//  open the "Strategy Tester" tab to backtest. Forward-test before live.
-//  Educational tool, not financial advice.
+//  Educational tool, not financial advice. Backtest with realistic
+//  commission + slippage, then forward-test before risking real money.
 // =====================================================================
-strategy("High Win-Rate Trend-Pullback",
+strategy("High Win-Rate Trend-Pullback v2",
      overlay              = true,
      pyramiding           = 0,
      initial_capital      = 1000,
@@ -26,33 +32,51 @@ strategy("High Win-Rate Trend-Pullback",
      process_orders_on_close = true)
 
 // ---------------------------------------------------------------------
-// Inputs — Strategy
+// Inputs — Strategy core
 // ---------------------------------------------------------------------
 gStrat       = "Strategy"
-emaFastLen   = input.int(50,   "Fast EMA (swing)",        group=gStrat, minval=2)
-emaSlowLen   = input.int(200,  "Slow EMA (trend filter)", group=gStrat, minval=5)
-rsiLen       = input.int(14,   "RSI period",              group=gStrat, minval=2)
-rsiBuyZone   = input.float(40, "RSI pullback zone (long)",group=gStrat)
-rsiSellZone  = input.float(60, "RSI pullback zone (short)",group=gStrat)
-atrLen       = input.int(14,   "ATR period",              group=gStrat, minval=2)
-allowLongs   = input.bool(true,"Allow longs",             group=gStrat)
-allowShorts  = input.bool(true,"Allow shorts",            group=gStrat)
+emaFastLen   = input.int(50,   "Fast EMA (swing)",         group=gStrat, minval=2)
+emaSlowLen   = input.int(200,  "Slow EMA (trend filter)",  group=gStrat, minval=5)
+rsiLen       = input.int(14,   "RSI period",               group=gStrat, minval=2)
+rsiBuyZone   = input.float(45, "RSI pullback zone (long)", group=gStrat)
+rsiSellZone  = input.float(55, "RSI pullback zone (short)",group=gStrat)
+atrLen       = input.int(14,   "ATR period",               group=gStrat, minval=2)
+allowLongs   = input.bool(true,"Allow longs",              group=gStrat)
+allowShorts  = input.bool(true,"Allow shorts",             group=gStrat)
 
 // ---------------------------------------------------------------------
-// Inputs — Higher-timeframe filter
+// Inputs — Trend-quality filters (the v2 fix for false / chop trades)
 // ---------------------------------------------------------------------
-gHtf         = "Higher-Timeframe Filter"
-useHtf       = input.bool(true,   "Require higher-TF trend agreement", group=gHtf)
-htfTf        = input.timeframe("60","Higher timeframe",                group=gHtf)
-htfEmaLen    = input.int(200,     "Higher-TF EMA period",              group=gHtf, minval=5)
+gQual        = "Trend Quality"
+useHtf       = input.bool(true,   "Require higher-TF trend agreement", group=gQual)
+htfTf        = input.timeframe("60","Higher timeframe",                group=gQual)
+htfEmaLen    = input.int(200,     "Higher-TF EMA period",              group=gQual, minval=5)
+useAdx       = input.bool(true,   "Require ADX trend strength",        group=gQual)
+adxLen       = input.int(14,      "ADX / DMI length",                  group=gQual, minval=2)
+adxMin       = input.float(22,    "Min ADX to trade",                  group=gQual)
+useSlope     = input.bool(true,   "Require slow-EMA slope agreement",  group=gQual)
+slopeLen     = input.int(5,       "Slope lookback (bars)",             group=gQual, minval=1)
+
+// ---------------------------------------------------------------------
+// Inputs — Pullback & confirmation (the v2 fix for premature SL hits)
+// ---------------------------------------------------------------------
+gPull        = "Pullback & Confirmation"
+pullLookback = input.int(6,    "Pullback lookback (bars)",            group=gPull, minval=1)
+pullTolAtr   = input.float(0.5,"EMA-tag tolerance (ATR x)",           group=gPull, minval=0)
+confirmBar   = input.bool(true,"Require confirmation candle vs EMA",  group=gPull)
+maxExtAtr    = input.float(2.0,"Max distance from fast EMA (ATR x)",  group=gPull, minval=0.1)
 
 // ---------------------------------------------------------------------
 // Inputs — Stops & targets
 // ---------------------------------------------------------------------
 gStops       = "Stops & Targets"
-atrSlMult    = input.float(1.5, "Stop-loss = ATR x",         group=gStops, minval=0.1)
-rrRatio      = input.float(1.5, "Take-profit R:R",           group=gStops, minval=0.1)
-minAtrPoints = input.int(0,     "Min ATR in ticks (0=off)",  group=gStops, minval=0)
+useSwingStop = input.bool(true, "Structure (swing) stop",     group=gStops)
+swingLook    = input.int(10,    "Swing lookback (bars)",      group=gStops, minval=2)
+stopBufAtr   = input.float(0.3, "Stop buffer beyond swing (ATR x)", group=gStops, minval=0)
+atrSlMult    = input.float(1.2, "Min stop = ATR x",           group=gStops, minval=0.1)
+maxStopAtr   = input.float(3.5, "Max stop = ATR x",           group=gStops, minval=0.5)
+rrRatio      = input.float(1.8, "Take-profit R:R",            group=gStops, minval=0.1)
+minAtrPoints = input.int(0,     "Min ATR in ticks (0=off)",   group=gStops, minval=0)
 
 // ---------------------------------------------------------------------
 // Inputs — Risk management
@@ -62,6 +86,7 @@ riskPercent  = input.float(1.0, "Risk % of equity per trade",   group=gRisk, min
 maxDailyLoss = input.float(4.0, "Max daily loss % (stop)",      group=gRisk, minval=0)
 dailyProfit  = input.float(6.0, "Daily profit lock % (0=off)",  group=gRisk, minval=0)
 maxTradesDay = input.int(5,     "Max trades per day (0=off)",   group=gRisk, minval=0)
+maxConsLoss  = input.int(3,     "Cooldown after N losses (0=off)", group=gRisk, minval=0)
 
 // ---------------------------------------------------------------------
 // Inputs — Session filter
@@ -91,19 +116,19 @@ emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
 rsi     = ta.rsi(close, rsiLen)
 atr     = ta.atr(atrLen)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 
-// Higher-timeframe EMA & close (confirmed values, non-repainting)
 htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
 htfClose = request.security(syminfo.tickerid, htfTf, close,                    lookahead=barmerge.lookahead_off)
-
 htfBull = not useHtf or htfClose > htfEma
 htfBear = not useHtf or htfClose < htfEma
 
 // ---------------------------------------------------------------------
-// Daily guardrails
+// Daily guardrails + consecutive-loss cooldown
 // ---------------------------------------------------------------------
 var float dayStartEquity = na
 var int   tradesToday    = 0
+var int   consLosses     = 0
 if na(dayStartEquity)
     dayStartEquity := strategy.equity
 
@@ -111,72 +136,100 @@ newDay = ta.change(time("D")) != 0
 if newDay
     dayStartEquity := strategy.equity
     tradesToday    := 0
+    consLosses     := 0   // fresh start each day
+
+// update consecutive-loss counter when a trade closes
+if ta.change(strategy.closedtrades) != 0 and strategy.closedtrades > 0
+    lastPnL = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    consLosses := lastPnL < 0 ? consLosses + 1 : 0
 
 dailyPnLPct  = dayStartEquity > 0 ? (strategy.equity - dayStartEquity) / dayStartEquity * 100 : 0.0
 lossLimitHit = maxDailyLoss > 0 and dailyPnLPct <= -maxDailyLoss
 profitLocked = dailyProfit   > 0 and dailyPnLPct >=  dailyProfit
 maxTradesHit = maxTradesDay  > 0 and tradesToday >=  maxTradesDay
+coolingDown  = maxConsLoss   > 0 and consLosses  >=  maxConsLoss
 
-// Session & volatility filters
 inSession = not useSession or not na(time(timeframe.period, sessionTime))
 atrOk     = minAtrPoints <= 0 or (atr / syminfo.mintick) >= minAtrPoints
-
-canTrade  = not lossLimitHit and not profitLocked and not maxTradesHit and inSession and atrOk
-
-// ---------------------------------------------------------------------
-// Entry signals (mirrors the MT5 logic: rsi[1] = pullback, rsi = trigger)
-// ---------------------------------------------------------------------
-upTrend     = close > emaSlow and emaFast > emaSlow
-buyPullback = rsi[1] <= rsiBuyZone
-buyTrigger  = rsi > rsi[1]
-longSignal  = allowLongs and htfBull and upTrend and buyPullback and buyTrigger
-
-downTrend    = close < emaSlow and emaFast < emaSlow
-sellPullback = rsi[1] >= rsiSellZone
-sellTrigger  = rsi < rsi[1]
-shortSignal  = allowShorts and htfBear and downTrend and sellPullback and sellTrigger
+canTrade  = not lossLimitHit and not profitLocked and not maxTradesHit and not coolingDown and inSession and atrOk
 
 // ---------------------------------------------------------------------
-// Position state (persisted)
+// Entry logic — v2 multi-filter trend-pullback continuation
+// ---------------------------------------------------------------------
+emaRising  = not useSlope or emaSlow > emaSlow[slopeLen]
+emaFalling = not useSlope or emaSlow < emaSlow[slopeLen]
+adxStrong  = not useAdx or adxVal >= adxMin
+longDirOk  = not useAdx or diPlus > diMinus
+shortDirOk = not useAdx or diMinus > diPlus
+
+// --- LONG ---
+upTrend       = close > emaSlow and emaFast > emaSlow
+pulledBackL   = ta.lowest(low, pullLookback) <= emaFast + pullTolAtr * atr   // price tagged the EMA zone
+rsiDipL       = ta.lowest(rsi, pullLookback) <= rsiBuyZone                   // momentum dipped to value
+notExtendedL  = (close - emaFast) <= maxExtAtr * atr                         // not chasing
+confirmL      = not confirmBar or (close > open and close > emaFast)         // bullish close back above EMA
+momUpL        = rsi > rsi[1]
+longSignal    = allowLongs and htfBull and upTrend and emaRising and adxStrong and longDirOk and pulledBackL and rsiDipL and notExtendedL and confirmL and momUpL
+
+// --- SHORT ---
+downTrend     = close < emaSlow and emaFast < emaSlow
+pulledBackS   = ta.highest(high, pullLookback) >= emaFast - pullTolAtr * atr
+rsiDipS       = ta.highest(rsi, pullLookback) >= rsiSellZone
+notExtendedS  = (emaFast - close) <= maxExtAtr * atr
+confirmS      = not confirmBar or (close < open and close < emaFast)
+momDnS        = rsi < rsi[1]
+shortSignal   = allowShorts and htfBear and downTrend and emaFalling and adxStrong and shortDirOk and pulledBackS and rsiDipS and notExtendedS and confirmS and momDnS
+
+// ---------------------------------------------------------------------
+// Structure-based stop helpers
+// ---------------------------------------------------------------------
+calcLongStop() =>
+    swing   = ta.lowest(low, swingLook) - stopBufAtr * atr
+    raw     = useSwingStop ? math.min(swing, close - atrSlMult * atr) : close - atrSlMult * atr
+    minRoom = close - atrSlMult * atr        // at least this far
+    maxRoom = close - maxStopAtr * atr        // no further than this
+    math.max(math.min(raw, minRoom), maxRoom)
+
+calcShortStop() =>
+    swing   = ta.highest(high, swingLook) + stopBufAtr * atr
+    raw     = useSwingStop ? math.max(swing, close + atrSlMult * atr) : close + atrSlMult * atr
+    minRoom = close + atrSlMult * atr
+    maxRoom = close + maxStopAtr * atr
+    math.min(math.max(raw, minRoom), maxRoom)
+
+// ---------------------------------------------------------------------
+// Position state
 // ---------------------------------------------------------------------
 var float entryPrice = na
-var float initStop   = na
 var float rDist      = na
 var float finalTP    = na
 var float curStop    = na
-
 flat = strategy.position_size == 0
 
-// --- LONG entry ---
 if longSignal and canTrade and flat
-    stopDist   = atrSlMult * atr
+    stopPrice  = calcLongStop()
     entryPrice := close
-    initStop   := close - stopDist
-    rDist      := stopDist
-    finalTP    := close + stopDist * rrRatio
-    curStop    := initStop
-    riskMoney  = strategy.equity * riskPercent / 100.0
-    qty        = riskMoney / (stopDist * syminfo.pointvalue)
+    rDist      := close - stopPrice
+    finalTP    := close + rDist * rrRatio
+    curStop    := stopPrice
+    qty        = (strategy.equity * riskPercent / 100.0) / (rDist * syminfo.pointvalue)
     strategy.entry("Long", strategy.long, qty=qty)
     tradesToday += 1
 
-// --- SHORT entry ---
 if shortSignal and canTrade and flat
-    stopDist   = atrSlMult * atr
+    stopPrice  = calcShortStop()
     entryPrice := close
-    initStop   := close + stopDist
-    rDist      := stopDist
-    finalTP    := close - stopDist * rrRatio
-    curStop    := initStop
-    riskMoney  = strategy.equity * riskPercent / 100.0
-    qty        = riskMoney / (stopDist * syminfo.pointvalue)
+    rDist      := stopPrice - close
+    finalTP    := close - rDist * rrRatio
+    curStop    := stopPrice
+    qty        = (strategy.equity * riskPercent / 100.0) / (rDist * syminfo.pointvalue)
     strategy.entry("Short", strategy.short, qty=qty)
     tradesToday += 1
 
 // ---------------------------------------------------------------------
 // Trade management: break-even -> ATR trailing, with scale-out partial
 // ---------------------------------------------------------------------
-if strategy.position_size > 0  // long open
+if strategy.position_size > 0 and rDist > 0
     if useBE and high >= entryPrice + beTriggerR * rDist
         curStop := math.max(curStop, entryPrice + beLockTicks * syminfo.mintick)
     if useTrail and high >= entryPrice + trailStartR * rDist
@@ -186,7 +239,7 @@ if strategy.position_size > 0  // long open
                      limit=entryPrice + partialTrigR * rDist, stop=curStop)
     strategy.exit("L-Exit", from_entry="Long", stop=curStop, limit=finalTP)
 
-if strategy.position_size < 0  // short open
+if strategy.position_size < 0 and rDist > 0
     if useBE and low <= entryPrice - beTriggerR * rDist
         curStop := math.min(curStop, entryPrice - beLockTicks * syminfo.mintick)
     if useTrail and low <= entryPrice - trailStartR * rDist
@@ -204,4 +257,29 @@ plot(emaSlow, "EMA Slow", color=color.new(color.blue, 0), linewidth=2)
 plotshape(longSignal  and canTrade and flat, "Long",  shape.triangleup,   location.belowbar, color.new(color.green,0), size=size.small)
 plotshape(shortSignal and canTrade and flat, "Short", shape.triangledown, location.abovebar, color.new(color.red,0),   size=size.small)
 bgcolor(useSession and not inSession ? color.new(color.gray, 90) : na, title="Out of session")
+
+// ---------------------------------------------------------------------
+// On-chart stats table (so you can judge "is it worth it" at a glance)
+// ---------------------------------------------------------------------
+showStats = input.bool(true, "Show stats table", group="Display")
+var table st = table.new(position.top_right, 2, 7, border_width=1)
+if barstate.islast and showStats
+    pf     = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
+    winPct = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
+    netPct = strategy.initial_capital > 0 ? strategy.netprofit / strategy.initial_capital * 100 : na
+    ddPct  = strategy.initial_capital > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : na
+    table.cell(st, 0, 0, "Metric", text_color=color.white, bgcolor=color.new(color.gray,0))
+    table.cell(st, 1, 0, "Value",  text_color=color.white, bgcolor=color.new(color.gray,0))
+    table.cell(st, 0, 1, "Net profit %")
+    table.cell(st, 1, 1, str.tostring(netPct, "#.##"))
+    table.cell(st, 0, 2, "Trades")
+    table.cell(st, 1, 2, str.tostring(strategy.closedtrades))
+    table.cell(st, 0, 3, "Win %")
+    table.cell(st, 1, 3, str.tostring(winPct, "#.##"))
+    table.cell(st, 0, 4, "Profit factor")
+    table.cell(st, 1, 4, str.tostring(pf, "#.##"))
+    table.cell(st, 0, 5, "Max DD %")
+    table.cell(st, 1, 5, str.tostring(ddPct, "#.##"))
+    table.cell(st, 0, 6, "Open PnL")
+    table.cell(st, 1, 6, str.tostring(strategy.openprofit, "#.##"))
 // =====================================================================

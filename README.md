@@ -6,6 +6,13 @@ the way a disciplined trader actually operates: trade *with* the higher trend,
 buy pullbacks into value (not extended moves), confirm momentum, and protect
 capital with hard daily limits and dynamic trade management.
 
+> **v2 update** — reworked to fix three real backtest weaknesses (too many
+> stop-outs, chop-driven false entries, missed good trades): added an **ADX/DMI
+> trend-strength gate**, **slow-EMA slope filter**, a **real pullback-to-value**
+> requirement (price must tag the fast-EMA zone *and* RSI dip into value), a
+> **confirmation candle**, **structure-based (swing) stops**, and a
+> **consecutive-loss cooldown**. See `docs/STRATEGY.md`.
+
 > ⚠️ **Disclaimer:** This is an educational/automation tool, not financial advice.
 > No strategy has a guaranteed win rate. **Always forward-test on a DEMO account
 > for weeks before risking real money.** Past performance does not guarantee
