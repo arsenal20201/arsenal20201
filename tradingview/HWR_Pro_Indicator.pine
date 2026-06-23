@@ -30,7 +30,7 @@ adxLen     = input.int(14,    "ADX length",                         group="Filte
 adxMin     = input.float(20,  "Min ADX to trade",                   group="Filters")
 useExt     = input.bool(true, "Filter: skip overextended entries",  group="Filters")
 maxExtAtr  = input.float(1.8, "Max distance from fast EMA (ATR x)",  group="Filters")
-useConfirm = input.bool(true, "Confirm on bar close (no repaint)",  group="Filters")
+useConfirm = input.bool(false, "Confirm on bar close (ON = no repaint but signal shows at close; OFF = live signal that can repaint)",  group="Filters")
 cooldownBars = input.int(5,   "Cooldown bars between signals",      group="Filters")
 
 atrLen     = input.int(14,  "ATR length",                  group="Risk")
@@ -225,6 +225,14 @@ if (not tradeActive) and (not na(tradeEndX)) and showLevels
         box.set_right(slBox, xF)
 
 // ----------------------------- Alerts --------------------------------
+// Real-time: fires the MOMENT a signal forms on the live bar (one alert per
+// bar). Create ONE alert on this indicator with condition "Any alert() call".
+if longSignal
+    alert("HWR Pro: LONG " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + "  SL " + str.tostring(slLevel, format.mintick), alert.freq_once_per_bar)
+if shortSignal
+    alert("HWR Pro: SHORT " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + "  SL " + str.tostring(slLevel, format.mintick), alert.freq_once_per_bar)
+
+// Dropdown alertconditions (alternative way to set alerts)
 alertcondition(longSignal,  title="Long signal",  message="HWR Pro: LONG setup")
 alertcondition(shortSignal, title="Short signal", message="HWR Pro: SHORT setup")
 
