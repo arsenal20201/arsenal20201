@@ -1,0 +1,272 @@
+//@version=6
+// =====================================================================
+//  HIGH WIN-RATE PRO — Signal Indicator
+//  ---------------------------------------------------------------------
+//  EMA-cross entries FILTERED to cut false signals:
+//    * EMA-200 trend filter        (no counter-trend trades)
+//    * Multi-timeframe agreement   (higher TFs must agree)
+//    * ADX trend-strength gate     (no trading in chop)
+//    * Overextension guard         (don't chase stretched moves)
+//    * Bar-close confirmation      (no intrabar repaint)
+//    * Cooldown                    (no whipsaw clusters)
+//  Structure-based stop, ATR R-multiple take-profits (TP1..TP4),
+//  on-chart Entry/SL/TP lines + boxes + labels, and an instant
+//  multi-timeframe dashboard.
+//
+//  Educational tool, not financial advice.
+// =====================================================================
+indicator("High Win-Rate Pro Signals", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=100)
+
+// ----------------------------- Inputs --------------------------------
+emaFastLen  = input.int(11,  "Fast EMA",  group="Signal")
+emaSlowLen  = input.int(34,  "Slow EMA",  group="Signal")
+emaTrendLen = input.int(200, "Trend EMA", group="Signal")
+showRibbon  = input.bool(true, "Show EMA ribbon fill", group="Signal")
+
+useTrend   = input.bool(true, "Filter: trade with EMA-200 trend",  group="Filters")
+useMtf     = input.bool(true, "Filter: higher-timeframe agreement", group="Filters")
+useAdx     = input.bool(true, "Filter: ADX trend strength",         group="Filters")
+adxLen     = input.int(14,    "ADX length",                         group="Filters")
+adxMin     = input.float(20,  "Min ADX to trade",                   group="Filters")
+useExt     = input.bool(true, "Filter: skip overextended entries",  group="Filters")
+maxExtAtr  = input.float(1.8, "Max distance from fast EMA (ATR x)",  group="Filters")
+useConfirm = input.bool(true, "Confirm on bar close (no repaint)",  group="Filters")
+cooldownBars = input.int(5,   "Cooldown bars between signals",      group="Filters")
+
+atrLen     = input.int(14,  "ATR length",                  group="Risk")
+useSwing   = input.bool(true,"Structure (swing) stop",     group="Risk")
+swingLook  = input.int(10,  "Swing lookback (bars)",       group="Risk")
+stopBuf    = input.float(0.3,"Stop buffer beyond swing (ATR x)", group="Risk")
+atrSlMult  = input.float(1.5,"Min stop = ATR x",           group="Risk")
+maxStopAtr = input.float(3.5,"Max stop = ATR x",           group="Risk")
+tpCount    = input.int(4,   "Number of take-profits", minval=1, maxval=4, group="Risk")
+tpFactor   = input.float(1.0,"TP spacing (R per TP)",      group="Risk")
+showLevels = input.bool(true,"Show entry/SL/TP lines & boxes", group="Risk")
+
+showDash   = input.bool(true, "Show dashboard", group="Dashboard")
+dashPos    = input.string("Bottom Right", "Dashboard position", options=["Top Left","Top Right","Bottom Left","Bottom Right"], group="Dashboard")
+mtfTF1     = input.string("15",  "MTF timeframe 1", options=["5","15","30","60","240","D"], group="Dashboard")
+mtfTF2     = input.string("60",  "MTF timeframe 2", options=["5","15","30","60","240","D"], group="Dashboard")
+mtfTF3     = input.string("240", "MTF timeframe 3", options=["5","15","30","60","240","D"], group="Dashboard")
+
+// ----------------------------- Indicators ----------------------------
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+atr      = ta.atr(atrLen)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+// ----------------------------- MTF trend -----------------------------
+b1 = request.security(syminfo.tickerid, mtfTF1, ta.ema(close, emaFastLen) > ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
+b2 = request.security(syminfo.tickerid, mtfTF2, ta.ema(close, emaFastLen) > ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
+b3 = request.security(syminfo.tickerid, mtfTF3, ta.ema(close, emaFastLen) > ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
+mtfBullCount = (b1 ? 1 : 0) + (b2 ? 1 : 0) + (b3 ? 1 : 0)
+
+// ----------------------------- Signal logic --------------------------
+baseLong  = ta.crossover(emaFast, emaSlow)
+baseShort = ta.crossunder(emaFast, emaSlow)
+
+trendLongOk  = not useTrend or close > emaTrend
+trendShortOk = not useTrend or close < emaTrend
+adxOk        = not useAdx   or adxVal >= adxMin
+extLongOk    = not useExt   or (close - emaFast) <= maxExtAtr * atr
+extShortOk   = not useExt   or (emaFast - close) <= maxExtAtr * atr
+mtfLongOk    = not useMtf   or mtfBullCount >= 2
+mtfShortOk   = not useMtf   or mtfBullCount <= 1
+confirmOk    = not useConfirm or barstate.isconfirmed
+
+var int lastSigBar = -100000
+cooldownOk = (bar_index - lastSigBar) >= cooldownBars
+
+longSignal  = baseLong  and trendLongOk  and adxOk and extLongOk  and mtfLongOk  and confirmOk and cooldownOk
+shortSignal = baseShort and trendShortOk and adxOk and extShortOk and mtfShortOk and confirmOk and cooldownOk
+
+// ----------------------------- Stop helpers --------------------------
+calcLongStop() =>
+    sw   = ta.lowest(low, swingLook) - stopBuf * atr
+    near = close - atrSlMult * atr
+    far  = close - maxStopAtr * atr
+    hi   = math.max(near, far)
+    lo   = math.min(near, far)
+    raw  = useSwing ? math.min(sw, hi) : hi
+    math.max(math.min(raw, hi), lo)
+
+calcShortStop() =>
+    sw   = ta.highest(high, swingLook) + stopBuf * atr
+    near = close + atrSlMult * atr
+    far  = close + maxStopAtr * atr
+    hi   = math.max(near, far)
+    lo   = math.min(near, far)
+    raw  = useSwing ? math.max(sw, lo) : lo
+    math.min(math.max(raw, lo), hi)
+
+// ----------------------------- Ribbon plots --------------------------
+pF = plot(emaFast,  "Fast EMA",  color=color.new(color.aqua, 0),   linewidth=1)
+pS = plot(emaSlow,  "Slow EMA",  color=color.new(color.orange, 0), linewidth=1)
+plot(emaTrend, "Trend EMA", color=color.new(color.purple, 0), linewidth=2)
+fill(pF, pS, color = showRibbon ? (emaFast > emaSlow ? color.new(color.green, 85) : color.new(color.red, 85)) : na)
+bgcolor(useTrend ? (close > emaTrend ? color.new(color.green, 95) : color.new(color.red, 95)) : na, title="Trend tint")
+
+// ----------------------------- Trade state ---------------------------
+var label signalLabel = na
+var array<float> tpLevels  = array.new<float>()
+var array<bool>  tpHit     = array.new<bool>()
+var array<line>  tpLines   = array.new<line>()
+var array<label> rightLbls = array.new<label>()
+var line  slLine    = na
+var line  entryLine = na
+var box   tpBox     = na
+var box   slBox     = na
+var float entryLevel = na
+var float slLevel    = na
+var int   tradeDir   = 0
+var bool  tradeActive = false
+var int   tradeEndX  = na
+
+// ----------------------------- New signal ----------------------------
+if (longSignal or shortSignal)
+    lastSigBar := bar_index
+    if not na(signalLabel)
+        label.delete(signalLabel)
+    if array.size(tpLines) > 0
+        for i = 0 to array.size(tpLines) - 1
+            line.delete(array.get(tpLines, i))
+    array.clear(tpLines)
+    if not na(slLine)
+        line.delete(slLine)
+        slLine := na
+    if not na(entryLine)
+        line.delete(entryLine)
+        entryLine := na
+    if array.size(rightLbls) > 0
+        for i = 0 to array.size(rightLbls) - 1
+            label.delete(array.get(rightLbls, i))
+    array.clear(rightLbls)
+    if not na(tpBox)
+        box.delete(tpBox)
+        tpBox := na
+    if not na(slBox)
+        box.delete(slBox)
+        slBox := na
+
+    tradeActive := true
+    tradeEndX := na
+    tradeDir := longSignal ? 1 : -1
+    entryLevel := close
+    slLevel := longSignal ? calcLongStop() : calcShortStop()
+    rDist = math.abs(entryLevel - slLevel)
+
+    array.clear(tpLevels)
+    array.clear(tpHit)
+    for i = 1 to tpCount
+        tp = entryLevel + tradeDir * rDist * tpFactor * i
+        array.push(tpLevels, tp)
+        array.push(tpHit, false)
+
+    signalLabel := label.new(bar_index, tradeDir > 0 ? low : high, tradeDir > 0 ? "BUY" : "SELL", style=tradeDir > 0 ? label.style_label_up : label.style_label_down, color=tradeDir > 0 ? color.green : color.red, textcolor=color.white, size=size.small)
+
+    if showLevels
+        xR = bar_index + 10
+        entryLine := line.new(bar_index, entryLevel, xR, entryLevel, color=#fff100, width=2)
+        array.push(rightLbls, label.new(xR, entryLevel, "ENTRY " + str.tostring(entryLevel, format.mintick), style=label.style_label_left, color=#fff100, textcolor=color.black, size=size.small))
+        for i = 0 to array.size(tpLevels) - 1
+            yv = array.get(tpLevels, i)
+            array.push(tpLines, line.new(bar_index, yv, xR, yv, color=color.green, width=2))
+            array.push(rightLbls, label.new(xR, yv, "TP" + str.tostring(i + 1) + " " + str.tostring(yv, format.mintick), style=label.style_label_left, color=color.green, textcolor=color.white, size=size.small))
+        slLine := line.new(bar_index, slLevel, xR, slLevel, color=color.red, width=2)
+        array.push(rightLbls, label.new(xR, slLevel, "SL " + str.tostring(slLevel, format.mintick), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.small))
+        tp4 = array.get(tpLevels, array.size(tpLevels) - 1)
+        tpBox := box.new(bar_index, math.max(entryLevel, tp4), xR, math.min(entryLevel, tp4), bgcolor=color.new(color.green, 88), border_color=color.new(color.green, 100))
+        slBox := box.new(bar_index, math.max(entryLevel, slLevel), xR, math.min(entryLevel, slLevel), bgcolor=color.new(color.red, 88), border_color=color.new(color.red, 100))
+
+// ----------------------------- Manage trade --------------------------
+if tradeActive and showLevels
+    xR = bar_index + 10
+    if not na(entryLine)
+        line.set_x2(entryLine, xR)
+    for i = 0 to array.size(tpLines) - 1
+        line.set_x2(array.get(tpLines, i), xR)
+    if not na(slLine)
+        line.set_x2(slLine, xR)
+    for i = 0 to array.size(rightLbls) - 1
+        label.set_x(array.get(rightLbls, i), xR)
+    if not na(tpBox)
+        box.set_right(tpBox, xR)
+    if not na(slBox)
+        box.set_right(slBox, xR)
+
+    slHit = (tradeDir > 0 and low <= slLevel) or (tradeDir < 0 and high >= slLevel)
+    bool allHit = true
+    for i = 0 to array.size(tpLevels) - 1
+        lvl = array.get(tpLevels, i)
+        hitNow = (tradeDir > 0 and high >= lvl) or (tradeDir < 0 and low <= lvl)
+        if hitNow
+            array.set(tpHit, i, true)
+        if not array.get(tpHit, i)
+            allHit := false
+    if slHit or allHit
+        tradeActive := false
+        tradeEndX := bar_index
+
+// ----------------------------- Freeze on close -----------------------
+if (not tradeActive) and (not na(tradeEndX)) and showLevels
+    xF = tradeEndX + 10
+    if not na(entryLine)
+        line.set_x2(entryLine, xF)
+    for i = 0 to array.size(tpLines) - 1
+        line.set_x2(array.get(tpLines, i), xF)
+    if not na(slLine)
+        line.set_x2(slLine, xF)
+    for i = 0 to array.size(rightLbls) - 1
+        label.set_x(array.get(rightLbls, i), xF)
+    if not na(tpBox)
+        box.set_right(tpBox, xF)
+    if not na(slBox)
+        box.set_right(slBox, xF)
+
+// ----------------------------- Alerts --------------------------------
+alertcondition(longSignal,  title="Long signal",  message="HWR Pro: LONG setup")
+alertcondition(shortSignal, title="Short signal", message="HWR Pro: SHORT setup")
+
+// ----------------------------- Dashboard -----------------------------
+dashTablePos(p) =>
+    switch p
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.bottom_right
+
+if showDash and barstate.islast
+    var table d = table.new(dashTablePos(dashPos), 2, 9, bgcolor=color.new(#1e222d, 0), border_width=1, border_color=color.new(color.gray, 50), frame_width=1, frame_color=color.new(color.gray, 0))
+    wt = color.white
+    cb = color.new(#1e222d, 0)
+    hd = color.new(#2a2e39, 0)
+    gC = color.new(color.green, 0)
+    rC = color.new(color.red, 0)
+
+    chartBull = emaFast > emaSlow
+    combCount = (b1 ? 1 : 0) + (b2 ? 1 : 0) + (b3 ? 1 : 0)
+    combBull  = combCount >= 2
+    posTxt = tradeActive ? (tradeDir > 0 ? "LONG" : "SHORT") : "FLAT"
+    posBg  = tradeActive ? (tradeDir > 0 ? gC : rC) : hd
+
+    table.cell(d, 0, 0, "HWR PRO", text_color=wt, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 0, posTxt,    text_color=wt, bgcolor=posBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 1, "Trend (EMA200)", text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 1, close > emaTrend ? "UP" : "DOWN", text_color=wt, bgcolor=close > emaTrend ? gC : rC, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 2, "ADX", text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 2, str.tostring(adxVal, "#.#") + (adxVal >= adxMin ? " ok" : " weak"), text_color=wt, bgcolor=adxVal >= adxMin ? gC : hd, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 3, "MTF " + mtfTF1, text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 3, b1 ? "Bull" : "Bear", text_color=wt, bgcolor=b1 ? gC : rC, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 4, "MTF " + mtfTF2, text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 4, b2 ? "Bull" : "Bear", text_color=wt, bgcolor=b2 ? gC : rC, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 5, "MTF " + mtfTF3, text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 5, b3 ? "Bull" : "Bear", text_color=wt, bgcolor=b3 ? gC : rC, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 6, "Combined", text_color=wt, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 6, combBull ? "BULLISH" : "BEARISH", text_color=wt, bgcolor=combBull ? gC : rC, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 7, "Entry", text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 7, tradeActive ? str.tostring(entryLevel, format.mintick) : "-", text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(d, 0, 8, "Stop", text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(d, 1, 8, tradeActive ? str.tostring(slLevel, format.mintick) : "-", text_color=wt, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+// =====================================================================
