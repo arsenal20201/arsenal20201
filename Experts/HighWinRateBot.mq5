@@ -147,14 +147,30 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeResult &result)
   {
    if(trans.type!=TRADE_TRANSACTION_DEAL_ADD) return;
+   if(trans.deal==0) return;
    if(!HistoryDealSelect(trans.deal)) return;
    if(HistoryDealGetInteger(trans.deal,DEAL_MAGIC)!=InpMagicNumber) return;
    if(HistoryDealGetString(trans.deal,DEAL_SYMBOL)!=_Symbol) return;
    if(HistoryDealGetInteger(trans.deal,DEAL_ENTRY)!=DEAL_ENTRY_OUT) return;
 
-   double profit = HistoryDealGetDouble(trans.deal,DEAL_PROFIT)
-                 + HistoryDealGetDouble(trans.deal,DEAL_SWAP)
-                 + HistoryDealGetDouble(trans.deal,DEAL_COMMISSION);
+   //--- BUGFIX: a scale-out partial is also a DEAL_ENTRY_OUT. Only update the
+   //--- loss streak once the WHOLE position is closed, using its total P/L.
+   ulong posId=(ulong)HistoryDealGetInteger(trans.deal,DEAL_POSITION_ID);
+   if(PositionSelectByTicket(posId)) return;   // still partly open -> wait
+
+   double profit=0.0;
+   if(HistorySelectByPosition(posId))
+     {
+      int deals=HistoryDealsTotal();
+      for(int i=0;i<deals;i++)
+        {
+         ulong d=HistoryDealGetTicket(i);
+         if(d==0) continue;
+         profit += HistoryDealGetDouble(d,DEAL_PROFIT)
+                 + HistoryDealGetDouble(d,DEAL_SWAP)
+                 + HistoryDealGetDouble(d,DEAL_COMMISSION);
+        }
+     }
    g_risk.RegisterTradeClosed(profit);
   }
 

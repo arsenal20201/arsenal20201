@@ -249,7 +249,7 @@ void CRiskManager::RegisterTradeClosed(const double profit)
   }
 
 //+------------------------------------------------------------------+
-//| Position size so that hitting the SL loses ~m_riskPercent of bal |
+//| Position size so that hitting the SL loses ~m_riskPercent equity |
 //| slPriceDistance is the |entry - stoploss| distance in price.     |
 //+------------------------------------------------------------------+
 double CRiskManager::CalcLotSize(const double slPriceDistance)
@@ -257,8 +257,10 @@ double CRiskManager::CalcLotSize(const double slPriceDistance)
    if(slPriceDistance<=0.0)
       return 0.0;
 
-   double balance      = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskMoney    = balance*m_riskPercent/100.0;
+   //--- BUGFIX: size off EQUITY to match the daily loss/profit guards (which
+   //--- use equity); using balance would over-risk while a position is open.
+   double equity       = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskMoney    = equity*m_riskPercent/100.0;
 
    double tickValue    = SymbolInfoDouble(m_symbol,SYMBOL_TRADE_TICK_VALUE);
    double tickSize     = SymbolInfoDouble(m_symbol,SYMBOL_TRADE_TICK_SIZE);

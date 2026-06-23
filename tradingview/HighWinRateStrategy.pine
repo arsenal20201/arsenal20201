@@ -116,8 +116,10 @@ trendEma = ta.ema(close, trendEmaLen)
 atr      = ta.atr(atrLen)
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 
-htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
-htfClose = request.security(syminfo.tickerid, htfTf, close,                    lookahead=barmerge.lookahead_off)
+// BUGFIX #2: take the last CONFIRMED higher-TF value ([1]) so the filter does
+// not repaint on the still-forming HTF bar.
+htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, htfTf, close[1],                    lookahead=barmerge.lookahead_off)
 htfBull = not useHtf or htfClose > htfEma
 htfBear = not useHtf or htfClose < htfEma
 
@@ -138,8 +140,8 @@ if newDay
     dayStartEquity := strategy.equity
     tradesToday    := 0
     consLosses     := 0
-if ta.change(strategy.closedtrades) != 0 and strategy.closedtrades > 0
-    consLosses := strategy.closedtrades.profit(strategy.closedtrades - 1) < 0 ? consLosses + 1 : 0
+// NOTE: the loss-streak counter is updated on a true FULL close (see below),
+// not on every closedtrades change, so scale-out partials don't corrupt it.
 
 dailyPnLPct  = dayStartEquity > 0 ? (strategy.equity - dayStartEquity) / dayStartEquity * 100 : 0.0
 lossLimitHit = maxDailyLoss > 0 and dailyPnLPct <= -maxDailyLoss
@@ -164,27 +166,34 @@ shortSignal = allowShorts and trendDn and htfBear and adxStrong and dirOkS and t
 // ---------------------------------------------------------------------
 // Structure-based stop helpers
 // ---------------------------------------------------------------------
+// BUGFIX #4: clamp between the nearest and farthest allowed stop regardless of
+// whether maxStopAtr was set >= atrSlMult (order-independent bounds).
 calcLongStop() =>
     swing   = ta.lowest(low, swingLook) - stopBufAtr * atr
-    minRoom = close - atrSlMult * atr
-    maxRoom = close - maxStopAtr * atr
-    raw     = useSwingStop ? math.min(swing, minRoom) : minRoom
-    math.max(math.min(raw, minRoom), maxRoom)
+    nearest = close - atrSlMult * atr        // closest allowed (highest price)
+    farthest= close - maxStopAtr * atr        // farthest allowed (lowest price)
+    hi      = math.max(nearest, farthest)
+    lo      = math.min(nearest, farthest)
+    raw     = useSwingStop ? math.min(swing, hi) : hi
+    math.max(math.min(raw, hi), lo)
 
 calcShortStop() =>
     swing   = ta.highest(high, swingLook) + stopBufAtr * atr
-    minRoom = close + atrSlMult * atr
-    maxRoom = close + maxStopAtr * atr
-    raw     = useSwingStop ? math.max(swing, minRoom) : minRoom
-    math.min(math.max(raw, minRoom), maxRoom)
+    nearest = close + atrSlMult * atr
+    farthest= close + maxStopAtr * atr
+    hi      = math.max(nearest, farthest)
+    lo      = math.min(nearest, farthest)
+    raw     = useSwingStop ? math.max(swing, lo) : lo
+    math.min(math.max(raw, lo), hi)
 
 // ---------------------------------------------------------------------
 // Position state
 // ---------------------------------------------------------------------
-var float entryPrice = na
-var float rDist      = na
-var float finalTP    = na
-var float curStop    = na
+var float entryPrice   = na
+var float rDist        = na
+var float finalTP      = na
+var float curStop      = na
+var bool  partialTaken = false   // BUGFIX #5: take the scale-out only once per trade
 flat = strategy.position_size == 0
 
 if longSignal and canTrade and flat
@@ -193,6 +202,7 @@ if longSignal and canTrade and flat
     rDist      := close - stopPrice
     finalTP    := close + rDist * rrRatio
     curStop    := stopPrice
+    partialTaken := false
     qty        = (strategy.equity * riskPercent / 100.0) / (rDist * syminfo.pointvalue)
     strategy.entry("Long", strategy.long, qty=qty)
     tradesToday += 1
@@ -203,6 +213,7 @@ if shortSignal and canTrade and flat
     rDist      := stopPrice - close
     finalTP    := close - rDist * rrRatio
     curStop    := stopPrice
+    partialTaken := false
     qty        = (strategy.equity * riskPercent / 100.0) / (rDist * syminfo.pointvalue)
     strategy.entry("Short", strategy.short, qty=qty)
     tradesToday += 1
@@ -215,9 +226,11 @@ if strategy.position_size > 0 and rDist > 0
         curStop := math.max(curStop, entryPrice + beLockTicks * syminfo.mintick)
     if useTrail and high >= entryPrice + trailStartR * rDist
         curStop := math.max(curStop, close - trailAtrMult * atr)
-    if usePartial
+    if usePartial and not partialTaken
         strategy.exit("L-TP1", from_entry="Long", qty_percent=partialPct,
                      limit=entryPrice + partialTrigR * rDist, stop=curStop)
+        if high >= entryPrice + partialTrigR * rDist
+            partialTaken := true   // filled -> stop re-issuing the scale-out
     strategy.exit("L-Exit", from_entry="Long", stop=curStop, limit=finalTP)
 
 if strategy.position_size < 0 and rDist > 0
@@ -225,10 +238,24 @@ if strategy.position_size < 0 and rDist > 0
         curStop := math.min(curStop, entryPrice - beLockTicks * syminfo.mintick)
     if useTrail and low <= entryPrice - trailStartR * rDist
         curStop := math.min(curStop, close + trailAtrMult * atr)
-    if usePartial
+    if usePartial and not partialTaken
         strategy.exit("S-TP1", from_entry="Short", qty_percent=partialPct,
                      limit=entryPrice - partialTrigR * rDist, stop=curStop)
+        if low <= entryPrice - partialTrigR * rDist
+            partialTaken := true
     strategy.exit("S-Exit", from_entry="Short", stop=curStop, limit=finalTP)
+
+// BUGFIX #3/#6: update the loss-streak ONLY on a true full close, and clear the
+// per-trade state so the dashboard / levels never show stale values.
+var float prevPosSize = 0.0
+if prevPosSize != 0 and strategy.position_size == 0
+    consLosses := strategy.closedtrades.profit(strategy.closedtrades - 1) < 0 ? consLosses + 1 : 0
+    entryPrice := na
+    rDist      := na
+    finalTP    := na
+    curStop    := na
+    partialTaken := false
+prevPosSize := strategy.position_size
 
 // ---------------------------------------------------------------------
 // DASHBOARD — draw entry / stop / target on the chart
@@ -264,6 +291,12 @@ if showLevels and (longSignal or shortSignal) and canTrade and flat
 // ---------------------------------------------------------------------
 // DASHBOARD — info table (active trade + performance)
 // ---------------------------------------------------------------------
+// BUGFIX #1: user-defined functions must live in the GLOBAL scope (not inside
+// the `if` block). f_row takes the table as a parameter to avoid forward refs.
+f_row(table t, int r, string k, string v) =>
+    table.cell(t, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, r, v, text_color=color.white, text_size=size.small, text_halign=text.align_right)
+
 var table dash = table.new(position.top_right, 2, 14, border_width=1, frame_width=1)
 if barstate.islast and showStats
     pf      = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
@@ -273,23 +306,20 @@ if barstate.islast and showStats
     dir     = longPos ? "LONG" : shortPos ? "SHORT" : "FLAT"
     riskUsd = inPos ? math.abs(entryPrice - curStop) * math.abs(strategy.position_size) * syminfo.pointvalue : na
     hc      = color.new(color.gray, 0)
-    f_row(r, k, v) =>
-        table.cell(dash, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
-        table.cell(dash, 1, r, v, text_color=color.white, text_size=size.small, text_halign=text.align_right)
     table.cell(dash, 0, 0, "ACTIVE TRADE", text_color=color.white, bgcolor=hc, text_size=size.small)
     table.cell(dash, 1, 0, dir,            text_color=color.white, bgcolor=(longPos?color.new(color.green,0):shortPos?color.new(color.red,0):hc), text_size=size.small)
-    f_row(1,  "Entry",        inPos ? str.tostring(entryPrice, format.mintick) : "-")
-    f_row(2,  "Stop loss",    inPos ? str.tostring(curStop,    format.mintick) : "-")
-    f_row(3,  "Partial TP",   inPos and usePartial ? str.tostring(tp1Price, format.mintick) : "-")
-    f_row(4,  "Target",       inPos ? str.tostring(finalTP,    format.mintick) : "-")
-    f_row(5,  "Risk ($)",     inPos ? str.tostring(riskUsd, "#.##") : "-")
-    f_row(6,  "Open PnL ($)", str.tostring(strategy.openprofit, "#.##"))
+    f_row(dash, 1,  "Entry",        inPos ? str.tostring(entryPrice, format.mintick) : "-")
+    f_row(dash, 2,  "Stop loss",    inPos ? str.tostring(curStop,    format.mintick) : "-")
+    f_row(dash, 3,  "Partial TP",   inPos and usePartial ? str.tostring(tp1Price, format.mintick) : "-")
+    f_row(dash, 4,  "Target",       inPos ? str.tostring(finalTP,    format.mintick) : "-")
+    f_row(dash, 5,  "Risk ($)",     inPos ? str.tostring(riskUsd, "#.##") : "-")
+    f_row(dash, 6,  "Open PnL ($)", str.tostring(strategy.openprofit, "#.##"))
     table.cell(dash, 0, 7, "PERFORMANCE", text_color=color.white, bgcolor=hc, text_size=size.small)
     table.cell(dash, 1, 7, "",            text_color=color.white, bgcolor=hc, text_size=size.small)
-    f_row(8,  "Net profit %",  str.tostring(netPct, "#.##"))
-    f_row(9,  "Trades",        str.tostring(strategy.closedtrades))
-    f_row(10, "Win %",         str.tostring(winPct, "#.##"))
-    f_row(11, "Profit factor", str.tostring(pf, "#.##"))
-    f_row(12, "Max DD %",      str.tostring(ddPct, "#.##"))
-    f_row(13, "Cooldown",      coolingDown ? "ON" : str.tostring(consLosses) + "/" + str.tostring(maxConsLoss))
+    f_row(dash, 8,  "Net profit %",  str.tostring(netPct, "#.##"))
+    f_row(dash, 9,  "Trades",        str.tostring(strategy.closedtrades))
+    f_row(dash, 10, "Win %",         str.tostring(winPct, "#.##"))
+    f_row(dash, 11, "Profit factor", str.tostring(pf, "#.##"))
+    f_row(dash, 12, "Max DD %",      str.tostring(ddPct, "#.##"))
+    f_row(dash, 13, "Cooldown",      coolingDown ? "ON" : str.tostring(consLosses) + "/" + str.tostring(maxConsLoss))
 // =====================================================================
