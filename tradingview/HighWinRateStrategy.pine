@@ -293,11 +293,13 @@ if showLevels and (longSignal or shortSignal) and canTrade and flat
 // ---------------------------------------------------------------------
 // BUGFIX #1: user-defined functions must live in the GLOBAL scope (not inside
 // the `if` block). f_row takes the table as a parameter to avoid forward refs.
+// Every cell gets a solid dark background so white text is readable on a white
+// chart (the previous version was invisible on the default light theme).
 f_row(table t, int r, string k, string v) =>
-    table.cell(t, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
-    table.cell(t, 1, r, v, text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    table.cell(t, 0, r, k, text_color=color.white, bgcolor=color.new(#1e222d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, r, v, text_color=color.white, bgcolor=color.new(#1e222d, 0), text_size=size.small, text_halign=text.align_right)
 
-var table dash = table.new(position.top_right, 2, 14, border_width=1, frame_width=1)
+var table dash = table.new(position.top_right, 2, 14, border_width=1, border_color=color.new(color.gray, 40), frame_width=1, frame_color=color.new(color.gray, 0))
 if barstate.islast and showStats
     pf      = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
     winPct  = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
@@ -305,9 +307,10 @@ if barstate.islast and showStats
     ddPct   = strategy.initial_capital > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : na
     dir     = longPos ? "LONG" : shortPos ? "SHORT" : "FLAT"
     riskUsd = inPos ? math.abs(entryPrice - curStop) * math.abs(strategy.position_size) * syminfo.pointvalue : na
-    hc      = color.new(color.gray, 0)
+    hc      = color.new(#2a2e39, 0)   // header background (dark)
+    dirBg   = longPos ? color.new(color.green, 0) : shortPos ? color.new(color.red, 0) : hc
     table.cell(dash, 0, 0, "ACTIVE TRADE", text_color=color.white, bgcolor=hc, text_size=size.small)
-    table.cell(dash, 1, 0, dir,            text_color=color.white, bgcolor=(longPos?color.new(color.green,0):shortPos?color.new(color.red,0):hc), text_size=size.small)
+    table.cell(dash, 1, 0, dir,            text_color=color.white, bgcolor=dirBg, text_size=size.small)
     f_row(dash, 1,  "Entry",        inPos ? str.tostring(entryPrice, format.mintick) : "-")
     f_row(dash, 2,  "Stop loss",    inPos ? str.tostring(curStop,    format.mintick) : "-")
     f_row(dash, 3,  "Partial TP",   inPos and usePartial ? str.tostring(tp1Price, format.mintick) : "-")
