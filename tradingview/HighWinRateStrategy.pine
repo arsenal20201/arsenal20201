@@ -38,8 +38,8 @@ strategy("High Win-Rate Mean-Reversion v3",
 // ---------------------------------------------------------------------
 gStrat       = "Strategy"
 rsiLen       = input.int(3,    "RSI period (short = mean reversion)", group=gStrat, minval=1)
-rsiOS        = input.float(15, "Oversold level (long entries)",      group=gStrat)
-rsiOB        = input.float(85, "Overbought level (short entries)",   group=gStrat)
+rsiOS        = input.float(25, "Oversold level (long entries)",      group=gStrat)
+rsiOB        = input.float(75, "Overbought level (short entries)",   group=gStrat)
 useTrend     = input.bool(true,"Trade only with the trend EMA",      group=gStrat)
 trendEmaLen  = input.int(200,  "Trend EMA period",                   group=gStrat, minval=5)
 atrLen       = input.int(14,   "ATR period",                         group=gStrat, minval=2)
@@ -276,17 +276,33 @@ plotshape(longSignal  and canTrade and flat, "Long",  shape.triangleup,   locati
 plotshape(shortSignal and canTrade and flat, "Short", shape.triangledown, location.abovebar, color.new(color.red,0),   size=size.small)
 bgcolor(useSession and not inSession ? color.new(color.gray, 90) : na, title="Out of session")
 
-// entry marker labels with the actual levels
+// PERSISTENT entry / stop / target lines for the latest setup. These stay on
+// screen (extend to the right) even when flat, so the levels are ALWAYS visible
+// — not only while a position happens to be open.
+var line  lnEntry = na
+var line  lnStop  = na
+var line  lnTP    = na
+var label lbEntry = na
+var label lbStop  = na
+var label lbTP    = na
+
 if showLevels and (longSignal or shortSignal) and canTrade and flat
-    lvlStop = longSignal ? calcLongStop() : calcShortStop()
-    lvlR    = math.abs(close - lvlStop)
-    lvlTP   = longSignal ? close + lvlR * rrRatio : close - lvlR * rrRatio
-    txt     = (longSignal ? "LONG\n" : "SHORT\n") + "Entry " + str.tostring(close, format.mintick) +
-              "\nSL " + str.tostring(lvlStop, format.mintick) + "\nTP " + str.tostring(lvlTP, format.mintick)
-    label.new(bar_index, longSignal ? low : high, txt,
-              style=longSignal ? label.style_label_up : label.style_label_down,
-              color=color.new(longSignal ? color.green : color.red, 20),
-              textcolor=color.white, size=size.small)
+    eStop = longSignal ? calcLongStop() : calcShortStop()
+    eR    = math.abs(close - eStop)
+    eTP   = longSignal ? close + eR * rrRatio : close - eR * rrRatio
+    if not na(lnEntry)
+        line.delete(lnEntry)
+        line.delete(lnStop)
+        line.delete(lnTP)
+        label.delete(lbEntry)
+        label.delete(lbStop)
+        label.delete(lbTP)
+    lnEntry := line.new(bar_index, close, bar_index + 1, close, color=color.new(color.gray, 0),  width=2, extend=extend.right)
+    lnStop  := line.new(bar_index, eStop, bar_index + 1, eStop, color=color.new(color.red, 0),    width=2, extend=extend.right)
+    lnTP    := line.new(bar_index, eTP,   bar_index + 1, eTP,   color=color.new(color.green, 0),  width=2, extend=extend.right)
+    lbEntry := label.new(bar_index, close, "ENTRY " + str.tostring(close, format.mintick), style=label.style_label_left, color=color.new(color.gray, 0),  textcolor=color.white, size=size.small)
+    lbStop  := label.new(bar_index, eStop, "SL "    + str.tostring(eStop, format.mintick), style=label.style_label_left, color=color.new(color.red, 0),   textcolor=color.white, size=size.small)
+    lbTP    := label.new(bar_index, eTP,   "TP "    + str.tostring(eTP,   format.mintick), style=label.style_label_left, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
 
 // ---------------------------------------------------------------------
 // DASHBOARD — info table (active trade + performance)
