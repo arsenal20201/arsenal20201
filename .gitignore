@@ -1,0 +1,18 @@
+# MetaTrader 5 compiled / generated artifacts
+*.ex5
+*.ex4
+
+# MetaEditor / tester output
+*.log
+*.opt
+*.set.bak
+Tester/
+Files/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
