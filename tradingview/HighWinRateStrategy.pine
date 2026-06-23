@@ -291,15 +291,11 @@ if showLevels and (longSignal or shortSignal) and canTrade and flat
 // ---------------------------------------------------------------------
 // DASHBOARD — info table (active trade + performance)
 // ---------------------------------------------------------------------
-// BUGFIX #1: user-defined functions must live in the GLOBAL scope (not inside
-// the `if` block). f_row takes the table as a parameter to avoid forward refs.
-// Every cell gets a solid dark background so white text is readable on a white
-// chart (the previous version was invisible on the default light theme).
-f_row(table t, int r, string k, string v) =>
-    table.cell(t, 0, r, k, text_color=color.white, bgcolor=color.new(#1e222d, 0), text_size=size.small, text_halign=text.align_left)
-    table.cell(t, 1, r, v, text_color=color.white, bgcolor=color.new(#1e222d, 0), text_size=size.small, text_halign=text.align_right)
-
+// Inlined (no helper function) for maximum compatibility. Solid dark cell
+// backgrounds keep the white text readable on a light OR dark chart.
 var table dash = table.new(position.top_right, 2, 14, border_width=1, border_color=color.new(color.gray, 40), frame_width=1, frame_color=color.new(color.gray, 0))
+cb = color.new(#1e222d, 0)   // cell background
+hc = color.new(#2a2e39, 0)   // header background
 if barstate.islast and showStats
     pf      = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
     winPct  = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
@@ -307,22 +303,38 @@ if barstate.islast and showStats
     ddPct   = strategy.initial_capital > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : na
     dir     = longPos ? "LONG" : shortPos ? "SHORT" : "FLAT"
     riskUsd = inPos ? math.abs(entryPrice - curStop) * math.abs(strategy.position_size) * syminfo.pointvalue : na
-    hc      = color.new(#2a2e39, 0)   // header background (dark)
     dirBg   = longPos ? color.new(color.green, 0) : shortPos ? color.new(color.red, 0) : hc
-    table.cell(dash, 0, 0, "ACTIVE TRADE", text_color=color.white, bgcolor=hc, text_size=size.small)
-    table.cell(dash, 1, 0, dir,            text_color=color.white, bgcolor=dirBg, text_size=size.small)
-    f_row(dash, 1,  "Entry",        inPos ? str.tostring(entryPrice, format.mintick) : "-")
-    f_row(dash, 2,  "Stop loss",    inPos ? str.tostring(curStop,    format.mintick) : "-")
-    f_row(dash, 3,  "Partial TP",   inPos and usePartial ? str.tostring(tp1Price, format.mintick) : "-")
-    f_row(dash, 4,  "Target",       inPos ? str.tostring(finalTP,    format.mintick) : "-")
-    f_row(dash, 5,  "Risk ($)",     inPos ? str.tostring(riskUsd, "#.##") : "-")
-    f_row(dash, 6,  "Open PnL ($)", str.tostring(strategy.openprofit, "#.##"))
-    table.cell(dash, 0, 7, "PERFORMANCE", text_color=color.white, bgcolor=hc, text_size=size.small)
-    table.cell(dash, 1, 7, "",            text_color=color.white, bgcolor=hc, text_size=size.small)
-    f_row(dash, 8,  "Net profit %",  str.tostring(netPct, "#.##"))
-    f_row(dash, 9,  "Trades",        str.tostring(strategy.closedtrades))
-    f_row(dash, 10, "Win %",         str.tostring(winPct, "#.##"))
-    f_row(dash, 11, "Profit factor", str.tostring(pf, "#.##"))
-    f_row(dash, 12, "Max DD %",      str.tostring(ddPct, "#.##"))
-    f_row(dash, 13, "Cooldown",      coolingDown ? "ON" : str.tostring(consLosses) + "/" + str.tostring(maxConsLoss))
+
+    table.cell(dash, 0, 0, "ACTIVE TRADE", text_color=color.white, bgcolor=hc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, dir,            text_color=color.white, bgcolor=dirBg, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 1, "Entry",        text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 1, inPos ? str.tostring(entryPrice, format.mintick) : "-", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 2, "Stop loss",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 2, inPos ? str.tostring(curStop, format.mintick) : "-",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 3, "Partial TP",   text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 3, inPos and usePartial ? str.tostring(tp1Price, format.mintick) : "-", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 4, "Target",       text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 4, inPos ? str.tostring(finalTP, format.mintick) : "-",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 5, "Risk ($)",     text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 5, inPos ? str.tostring(riskUsd, "#.##") : "-",            text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 6, "Open PnL ($)", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 6, str.tostring(strategy.openprofit, "#.##"),              text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 7, "PERFORMANCE",  text_color=color.white, bgcolor=hc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 7, "",             text_color=color.white, bgcolor=hc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 8, "Net profit %", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 8, str.tostring(netPct, "#.##"),  text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 9, "Trades",       text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 9, str.tostring(strategy.closedtrades), text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 10, "Win %",       text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 10, str.tostring(winPct, "#.##"), text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 11, "Profit factor", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 11, str.tostring(pf, "#.##"),     text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 12, "Max DD %",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 12, str.tostring(ddPct, "#.##"),  text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 13, "Cooldown",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 13, coolingDown ? "ON" : str.tostring(consLosses) + "/" + str.tostring(maxConsLoss), text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
+// =====================================================================
 // =====================================================================
