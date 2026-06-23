@@ -1,356 +1,150 @@
 //@version=5
 // =====================================================================
-//  High Win-Rate Mean-Reversion  v3  —  TradingView strategy
-//  ---------------------------------------------------------------------
-//  Lesson from v1/v2: over-filtering enters late and misses the move.
-//  v3 goes back to a clean, proven HIGH-WIN-RATE style — RSI mean
-//  reversion in the direction of the trend ("buy the dip in an uptrend,
-//  sell the rip in a downtrend") — with strict risk management and an
-//  on-chart DASHBOARD that draws entry / stop / targets for every trade.
-//
-//  Core idea (long; short is the mirror):
-//    * Trend up:    price above the trend EMA (default EMA200)
-//    * Oversold dip: short-period RSI drops below the oversold level
-//    * Enter the bounce, stop beyond structure/ATR, target a multiple
-//      of risk, scale out + trail the rest.
-//
-//  Optional filters (HTF agreement, ADX strength, confirm candle) are
-//  OFF by default — turn them on only if YOUR backtest says they help.
+//  HIGH WIN-RATE PRO  —  TradingView strategy
+//  Trend (EMA50/EMA200) + RSI pullback entries, ATR risk, R-multiple
+//  target, optional break-even. Clear on-chart Buy/Sell labels with
+//  Entry / SL / TP, live stop & target lines, dashboard, and alerts.
+//  Written with single-line statements (no fragile multi-line / helper
+//  functions) for maximum compile reliability.
 //
 //  Educational tool, not financial advice. Backtest with realistic
-//  commission + slippage, then forward-test before risking real money.
+//  commission + slippage and forward-test before risking real money.
 // =====================================================================
-strategy("High Win-Rate Mean-Reversion v3",
-     overlay              = true,
-     pyramiding           = 0,
-     initial_capital      = 1000,
-     default_qty_type     = strategy.fixed,
-     commission_type      = strategy.commission.percent,
-     commission_value     = 0.0,
-     slippage             = 0,
-     calc_on_every_tick   = false,
-     process_orders_on_close = true,
-     max_labels_count     = 100,
-     max_lines_count      = 100)
+strategy("High Win-Rate Pro", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=5, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, pyramiding=0, process_orders_on_close=true, max_labels_count=200, max_lines_count=200)
 
-// ---------------------------------------------------------------------
-// Inputs — Strategy core
-// ---------------------------------------------------------------------
-gStrat       = "Strategy"
-rsiLen       = input.int(3,    "RSI period (short = mean reversion)", group=gStrat, minval=1)
-rsiOS        = input.float(25, "Oversold level (long entries)",      group=gStrat)
-rsiOB        = input.float(75, "Overbought level (short entries)",   group=gStrat)
-useTrend     = input.bool(true,"Trade only with the trend EMA",      group=gStrat)
-trendEmaLen  = input.int(200,  "Trend EMA period",                   group=gStrat, minval=5)
-atrLen       = input.int(14,   "ATR period",                         group=gStrat, minval=2)
-allowLongs   = input.bool(true,"Allow longs",                        group=gStrat)
-allowShorts  = input.bool(true,"Allow shorts",                       group=gStrat)
+// ---------------------------- Inputs ----------------------------
+emaFastLen = input.int(50,  "Fast EMA",                 group="Trend")
+emaSlowLen = input.int(200, "Slow EMA",                 group="Trend")
+rsiLen     = input.int(14,  "RSI length",               group="Entry")
+rsiLongLvl = input.float(40,"RSI pullback level (long)", group="Entry")
+rsiShortLvl= input.float(60,"RSI pullback level (short)",group="Entry")
+atrLen     = input.int(14,  "ATR length",               group="Risk")
+slMult     = input.float(1.5,"Stop = ATR x",            group="Risk", minval=0.1)
+rr         = input.float(1.8,"Reward : Risk",           group="Risk", minval=0.1)
+riskPct    = input.float(1.0,"Risk % per trade",        group="Risk", minval=0.1, maxval=10)
+useBE      = input.bool(true,"Move stop to break-even at 1R", group="Manage")
+allowLong  = input.bool(true, "Allow longs",            group="General")
+allowShort = input.bool(true, "Allow shorts",           group="General")
+showDash   = input.bool(true, "Show dashboard",         group="Display")
+showLines  = input.bool(true, "Show entry/SL/TP lines", group="Display")
 
-// ---------------------------------------------------------------------
-// Inputs — Optional filters (default OFF; enable only if they help YOU)
-// ---------------------------------------------------------------------
-gOpt         = "Optional Filters"
-useHtf       = input.bool(false,  "Require higher-TF trend agreement", group=gOpt)
-htfTf        = input.timeframe("240","Higher timeframe",               group=gOpt)
-htfEmaLen    = input.int(200,     "Higher-TF EMA period",              group=gOpt, minval=5)
-useAdx       = input.bool(false,  "Require ADX trend strength",        group=gOpt)
-adxLen       = input.int(14,      "ADX / DMI length",                  group=gOpt, minval=2)
-adxMin       = input.float(18,    "Min ADX to trade",                  group=gOpt)
-useConfirm   = input.bool(false,  "Require confirmation candle",       group=gOpt)
+// ---------------------------- Indicators ------------------------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsi     = ta.rsi(close, rsiLen)
+atr     = ta.atr(atrLen)
 
-// ---------------------------------------------------------------------
-// Inputs — Stops & targets
-// ---------------------------------------------------------------------
-gStops       = "Stops & Targets"
-useSwingStop = input.bool(true, "Structure (swing) stop",            group=gStops)
-swingLook    = input.int(10,    "Swing lookback (bars)",             group=gStops, minval=2)
-stopBufAtr   = input.float(0.3, "Stop buffer beyond swing (ATR x)",  group=gStops, minval=0)
-atrSlMult    = input.float(1.5, "Min stop = ATR x",                  group=gStops, minval=0.1)
-maxStopAtr   = input.float(3.5, "Max stop = ATR x",                  group=gStops, minval=0.5)
-rrRatio      = input.float(1.5, "Take-profit R:R",                   group=gStops, minval=0.1)
-minAtrPoints = input.int(0,     "Min ATR in ticks (0=off)",          group=gStops, minval=0)
+up = emaFast > emaSlow and close > emaSlow
+dn = emaFast < emaSlow and close < emaSlow
 
-// ---------------------------------------------------------------------
-// Inputs — Risk management
-// ---------------------------------------------------------------------
-gRisk        = "Risk Management"
-riskPercent  = input.float(1.0, "Risk % of equity per trade",     group=gRisk, minval=0.1, maxval=20)
-maxDailyLoss = input.float(4.0, "Max daily loss % (stop)",        group=gRisk, minval=0)
-dailyProfit  = input.float(6.0, "Daily profit lock % (0=off)",    group=gRisk, minval=0)
-maxTradesDay = input.int(5,     "Max trades per day (0=off)",     group=gRisk, minval=0)
-maxConsLoss  = input.int(3,     "Cooldown after N losses (0=off)",group=gRisk, minval=0)
+longSig  = allowLong  and up and ta.crossover(rsi, rsiLongLvl)
+shortSig = allowShort and dn and ta.crossunder(rsi, rsiShortLvl)
 
-// ---------------------------------------------------------------------
-// Inputs — Session filter
-// ---------------------------------------------------------------------
-gSess        = "Session Filter"
-useSession   = input.bool(false,       "Restrict trading hours", group=gSess)
-sessionTime  = input.session("0700-2000","Session (exchange tz)",group=gSess)
-
-// ---------------------------------------------------------------------
-// Inputs — Trade management
-// ---------------------------------------------------------------------
-gManage      = "Trade Management"
-usePartial   = input.bool(true,  "Scale out partial at first target", group=gManage)
-partialTrigR = input.float(1.0,  "Take partial after this many R",    group=gManage, minval=0.1)
-partialPct   = input.float(50,   "% of position to close at partial", group=gManage, minval=1, maxval=99)
-useBE        = input.bool(true,  "Enable break-even",                 group=gManage)
-beTriggerR   = input.float(1.0,  "Move to BE after this many R",      group=gManage, minval=0.1)
-beLockTicks  = input.int(20,     "Ticks locked beyond entry at BE",   group=gManage, minval=0)
-useTrail     = input.bool(true,  "Enable ATR trailing stop",          group=gManage)
-trailAtrMult = input.float(2.0,  "Trailing distance = ATR x",         group=gManage, minval=0.1)
-trailStartR  = input.float(1.5,  "Start trailing after this many R",  group=gManage, minval=0.1)
-
-// ---------------------------------------------------------------------
-// Inputs — Dashboard
-// ---------------------------------------------------------------------
-gDash        = "Dashboard"
-showLevels   = input.bool(true, "Draw entry / stop / target lines", group=gDash)
-showStats    = input.bool(true, "Show info table",                  group=gDash)
-
-// ---------------------------------------------------------------------
-// Indicators
-// ---------------------------------------------------------------------
-rsi      = ta.rsi(close, rsiLen)
-trendEma = ta.ema(close, trendEmaLen)
-atr      = ta.atr(atrLen)
-[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
-
-// BUGFIX #2: take the last CONFIRMED higher-TF value ([1]) so the filter does
-// not repaint on the still-forming HTF bar.
-htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_off)
-htfClose = request.security(syminfo.tickerid, htfTf, close[1],                    lookahead=barmerge.lookahead_off)
-htfBull = not useHtf or htfClose > htfEma
-htfBear = not useHtf or htfClose < htfEma
-
-adxStrong = not useAdx or adxVal >= adxMin
-dirOkL    = not useAdx or diPlus > diMinus
-dirOkS    = not useAdx or diMinus > diPlus
-
-// ---------------------------------------------------------------------
-// Daily guardrails + consecutive-loss cooldown
-// ---------------------------------------------------------------------
-var float dayStartEquity = na
-var int   tradesToday    = 0
-var int   consLosses     = 0
-if na(dayStartEquity)
-    dayStartEquity := strategy.equity
-newDay = ta.change(time("D")) != 0
-if newDay
-    dayStartEquity := strategy.equity
-    tradesToday    := 0
-    consLosses     := 0
-// NOTE: the loss-streak counter is updated on a true FULL close (see below),
-// not on every closedtrades change, so scale-out partials don't corrupt it.
-
-dailyPnLPct  = dayStartEquity > 0 ? (strategy.equity - dayStartEquity) / dayStartEquity * 100 : 0.0
-lossLimitHit = maxDailyLoss > 0 and dailyPnLPct <= -maxDailyLoss
-profitLocked = dailyProfit   > 0 and dailyPnLPct >=  dailyProfit
-maxTradesHit = maxTradesDay  > 0 and tradesToday >=  maxTradesDay
-coolingDown  = maxConsLoss   > 0 and consLosses  >=  maxConsLoss
-inSession    = not useSession or not na(time(timeframe.period, sessionTime))
-atrOk        = minAtrPoints <= 0 or (atr / syminfo.mintick) >= minAtrPoints
-canTrade     = not lossLimitHit and not profitLocked and not maxTradesHit and not coolingDown and inSession and atrOk
-
-// ---------------------------------------------------------------------
-// Entry logic — RSI mean reversion with the trend
-// ---------------------------------------------------------------------
-trendUp   = not useTrend or close > trendEma
-trendDn   = not useTrend or close < trendEma
-confirmL  = not useConfirm or close > open
-confirmS  = not useConfirm or close < open
-
-longSignal  = allowLongs  and trendUp and htfBull and adxStrong and dirOkL and ta.crossunder(rsi, rsiOS) and confirmL
-shortSignal = allowShorts and trendDn and htfBear and adxStrong and dirOkS and ta.crossover(rsi, rsiOB)  and confirmS
-
-// ---------------------------------------------------------------------
-// Structure-based stop helpers
-// ---------------------------------------------------------------------
-// BUGFIX #4: clamp between the nearest and farthest allowed stop regardless of
-// whether maxStopAtr was set >= atrSlMult (order-independent bounds).
-calcLongStop() =>
-    swing   = ta.lowest(low, swingLook) - stopBufAtr * atr
-    nearest = close - atrSlMult * atr        // closest allowed (highest price)
-    farthest= close - maxStopAtr * atr        // farthest allowed (lowest price)
-    hi      = math.max(nearest, farthest)
-    lo      = math.min(nearest, farthest)
-    raw     = useSwingStop ? math.min(swing, hi) : hi
-    math.max(math.min(raw, hi), lo)
-
-calcShortStop() =>
-    swing   = ta.highest(high, swingLook) + stopBufAtr * atr
-    nearest = close + atrSlMult * atr
-    farthest= close + maxStopAtr * atr
-    hi      = math.max(nearest, farthest)
-    lo      = math.min(nearest, farthest)
-    raw     = useSwingStop ? math.max(swing, lo) : lo
-    math.min(math.max(raw, lo), hi)
-
-// ---------------------------------------------------------------------
-// Position state
-// ---------------------------------------------------------------------
-var float entryPrice   = na
-var float rDist        = na
-var float finalTP      = na
-var float curStop      = na
-var bool  partialTaken = false   // BUGFIX #5: take the scale-out only once per trade
+// ---------------------------- State -----------------------------
+var float eEntry = na
+var float eSL    = na
+var float eTP    = na
+var float eR     = na
+var bool  beDone = false
 flat = strategy.position_size == 0
 
-if longSignal and canTrade and flat
-    stopPrice  = calcLongStop()
-    entryPrice := close
-    rDist      := close - stopPrice
-    finalTP    := close + rDist * rrRatio
-    curStop    := stopPrice
-    partialTaken := false
-    qty        = (strategy.equity * riskPercent / 100.0) / (rDist * syminfo.pointvalue)
-    strategy.entry("Long", strategy.long, qty=qty)
-    tradesToday += 1
+// ---------------------------- Entries ---------------------------
+if longSig and flat
+    eEntry := close
+    eSL    := close - atr * slMult
+    eR     := eEntry - eSL
+    eTP    := eEntry + eR * rr
+    beDone := false
+    q = eR > 0 and syminfo.pointvalue > 0 ? (strategy.equity * riskPct / 100.0) / (eR * syminfo.pointvalue) : na
+    strategy.entry("Long", strategy.long, qty=q)
+    label.new(bar_index, low, "BUY " + str.tostring(eEntry, format.mintick) + "\nSL " + str.tostring(eSL, format.mintick) + "\nTP " + str.tostring(eTP, format.mintick), yloc=yloc.belowbar, style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
 
-if shortSignal and canTrade and flat
-    stopPrice  = calcShortStop()
-    entryPrice := close
-    rDist      := stopPrice - close
-    finalTP    := close - rDist * rrRatio
-    curStop    := stopPrice
-    partialTaken := false
-    qty        = (strategy.equity * riskPercent / 100.0) / (rDist * syminfo.pointvalue)
-    strategy.entry("Short", strategy.short, qty=qty)
-    tradesToday += 1
+if shortSig and flat
+    eEntry := close
+    eSL    := close + atr * slMult
+    eR     := eSL - eEntry
+    eTP    := eEntry - eR * rr
+    beDone := false
+    q = eR > 0 and syminfo.pointvalue > 0 ? (strategy.equity * riskPct / 100.0) / (eR * syminfo.pointvalue) : na
+    strategy.entry("Short", strategy.short, qty=q)
+    label.new(bar_index, high, "SELL " + str.tostring(eEntry, format.mintick) + "\nSL " + str.tostring(eSL, format.mintick) + "\nTP " + str.tostring(eTP, format.mintick), yloc=yloc.abovebar, style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
 
-// ---------------------------------------------------------------------
-// Trade management: break-even -> ATR trailing, with scale-out partial
-// ---------------------------------------------------------------------
-if strategy.position_size > 0 and rDist > 0
-    if useBE and high >= entryPrice + beTriggerR * rDist
-        curStop := math.max(curStop, entryPrice + beLockTicks * syminfo.mintick)
-    if useTrail and high >= entryPrice + trailStartR * rDist
-        curStop := math.max(curStop, close - trailAtrMult * atr)
-    if usePartial and not partialTaken
-        strategy.exit("L-TP1", from_entry="Long", qty_percent=partialPct,
-                     limit=entryPrice + partialTrigR * rDist, stop=curStop)
-        if high >= entryPrice + partialTrigR * rDist
-            partialTaken := true   // filled -> stop re-issuing the scale-out
-    strategy.exit("L-Exit", from_entry="Long", stop=curStop, limit=finalTP)
+// ---------------------------- Manage ----------------------------
+if strategy.position_size > 0
+    if useBE and not beDone and high >= eEntry + eR
+        eSL := eEntry
+        beDone := true
+    strategy.exit("Long X", "Long", stop=eSL, limit=eTP)
 
-if strategy.position_size < 0 and rDist > 0
-    if useBE and low <= entryPrice - beTriggerR * rDist
-        curStop := math.min(curStop, entryPrice - beLockTicks * syminfo.mintick)
-    if useTrail and low <= entryPrice - trailStartR * rDist
-        curStop := math.min(curStop, close + trailAtrMult * atr)
-    if usePartial and not partialTaken
-        strategy.exit("S-TP1", from_entry="Short", qty_percent=partialPct,
-                     limit=entryPrice - partialTrigR * rDist, stop=curStop)
-        if low <= entryPrice - partialTrigR * rDist
-            partialTaken := true
-    strategy.exit("S-Exit", from_entry="Short", stop=curStop, limit=finalTP)
+if strategy.position_size < 0
+    if useBE and not beDone and low <= eEntry - eR
+        eSL := eEntry
+        beDone := true
+    strategy.exit("Short X", "Short", stop=eSL, limit=eTP)
 
-// BUGFIX #3/#6: update the loss-streak ONLY on a true full close, and clear the
-// per-trade state so the dashboard / levels never show stale values.
-var float prevPosSize = 0.0
-if prevPosSize != 0 and strategy.position_size == 0
-    consLosses := strategy.closedtrades.profit(strategy.closedtrades - 1) < 0 ? consLosses + 1 : 0
-    entryPrice := na
-    rDist      := na
-    finalTP    := na
-    curStop    := na
-    partialTaken := false
-prevPosSize := strategy.position_size
+// clear levels when flat so the dashboard never shows stale data
+var float prevSize = 0.0
+if prevSize != 0 and strategy.position_size == 0
+    eEntry := na
+    eSL    := na
+    eTP    := na
+prevSize := strategy.position_size
 
-// ---------------------------------------------------------------------
-// DASHBOARD — draw entry / stop / target on the chart
-// ---------------------------------------------------------------------
-longPos  = strategy.position_size > 0
-shortPos = strategy.position_size < 0
-inPos    = longPos or shortPos
-tp1Price = longPos  ? entryPrice + partialTrigR * rDist :
-           shortPos ? entryPrice - partialTrigR * rDist : na
+// ---------------------------- Visuals ---------------------------
+p1 = plot(emaFast, "EMA Fast", color=color.new(color.orange, 0), linewidth=1)
+p2 = plot(emaSlow, "EMA Slow", color=color.new(color.blue, 0),   linewidth=2)
+fill(p1, p2, color = up ? color.new(color.green, 88) : dn ? color.new(color.red, 88) : na)
 
-plot(trendEma, "Trend EMA", color=color.new(color.blue, 0), linewidth=2)
-plot(inPos and showLevels ? entryPrice : na, "Entry",      color=color.new(color.gray, 0),  style=plot.style_linebr, linewidth=2)
-plot(inPos and showLevels ? curStop    : na, "Stop Loss",  color=color.new(color.red, 0),   style=plot.style_linebr, linewidth=2)
-plot(inPos and showLevels and usePartial ? tp1Price : na, "Partial TP", color=color.new(color.teal, 0), style=plot.style_linebr, linewidth=1)
-plot(inPos and showLevels ? finalTP    : na, "Target",     color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+inPos = strategy.position_size != 0
+plot(showLines and inPos ? eEntry : na, "Entry",  color=color.new(color.gray, 0),  style=plot.style_linebr, linewidth=1)
+plot(showLines and inPos ? eSL    : na, "Stop",   color=color.new(color.red, 0),   style=plot.style_linebr, linewidth=2)
+plot(showLines and inPos ? eTP    : na, "Target", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
 
-plotshape(longSignal  and canTrade and flat, "Long",  shape.triangleup,   location.belowbar, color.new(color.green,0), size=size.small)
-plotshape(shortSignal and canTrade and flat, "Short", shape.triangledown, location.abovebar, color.new(color.red,0),   size=size.small)
-bgcolor(useSession and not inSession ? color.new(color.gray, 90) : na, title="Out of session")
+plotshape(longSig  and flat, "Buy",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(shortSig and flat, "Sell", shape.triangledown, location.abovebar, color.new(color.red, 0),   size=size.small)
+bgcolor(up ? color.new(color.green, 95) : dn ? color.new(color.red, 95) : na, title="Trend tint")
 
-// PERSISTENT entry / stop / target lines for the latest setup. These stay on
-// screen (extend to the right) even when flat, so the levels are ALWAYS visible
-// — not only while a position happens to be open.
-var line  lnEntry = na
-var line  lnStop  = na
-var line  lnTP    = na
-var label lbEntry = na
-var label lbStop  = na
-var label lbTP    = na
+// ---------------------------- Alerts ----------------------------
+alertcondition(longSig  and flat, "Long entry",  "HWR Pro: LONG setup")
+alertcondition(shortSig and flat, "Short entry", "HWR Pro: SHORT setup")
 
-if showLevels and (longSignal or shortSignal) and canTrade and flat
-    eStop = longSignal ? calcLongStop() : calcShortStop()
-    eR    = math.abs(close - eStop)
-    eTP   = longSignal ? close + eR * rrRatio : close - eR * rrRatio
-    if not na(lnEntry)
-        line.delete(lnEntry)
-        line.delete(lnStop)
-        line.delete(lnTP)
-        label.delete(lbEntry)
-        label.delete(lbStop)
-        label.delete(lbTP)
-    lnEntry := line.new(bar_index, close, bar_index + 1, close, color=color.new(color.gray, 0),  width=2, extend=extend.right)
-    lnStop  := line.new(bar_index, eStop, bar_index + 1, eStop, color=color.new(color.red, 0),    width=2, extend=extend.right)
-    lnTP    := line.new(bar_index, eTP,   bar_index + 1, eTP,   color=color.new(color.green, 0),  width=2, extend=extend.right)
-    lbEntry := label.new(bar_index, close, "ENTRY " + str.tostring(close, format.mintick), style=label.style_label_left, color=color.new(color.gray, 0),  textcolor=color.white, size=size.small)
-    lbStop  := label.new(bar_index, eStop, "SL "    + str.tostring(eStop, format.mintick), style=label.style_label_left, color=color.new(color.red, 0),   textcolor=color.white, size=size.small)
-    lbTP    := label.new(bar_index, eTP,   "TP "    + str.tostring(eTP,   format.mintick), style=label.style_label_left, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
-
-// ---------------------------------------------------------------------
-// DASHBOARD — info table (active trade + performance)
-// ---------------------------------------------------------------------
-// Inlined (no helper function) for maximum compatibility. Solid dark cell
-// backgrounds keep the white text readable on a light OR dark chart.
-var table dash = table.new(position.top_right, 2, 14, border_width=1, border_color=color.new(color.gray, 40), frame_width=1, frame_color=color.new(color.gray, 0))
-cb = color.new(#1e222d, 0)   // cell background
-hc = color.new(#2a2e39, 0)   // header background
-if barstate.islast and showStats
-    pf      = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
-    winPct  = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
-    netPct  = strategy.initial_capital > 0 ? strategy.netprofit / strategy.initial_capital * 100 : na
-    ddPct   = strategy.initial_capital > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : na
-    dir     = longPos ? "LONG" : shortPos ? "SHORT" : "FLAT"
-    riskUsd = inPos ? math.abs(entryPrice - curStop) * math.abs(strategy.position_size) * syminfo.pointvalue : na
-    dirBg   = longPos ? color.new(color.green, 0) : shortPos ? color.new(color.red, 0) : hc
-
-    table.cell(dash, 0, 0, "ACTIVE TRADE", text_color=color.white, bgcolor=hc, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 0, dir,            text_color=color.white, bgcolor=dirBg, text_size=size.small, text_halign=text.align_right)
-
-    table.cell(dash, 0, 1, "Entry",        text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 1, inPos ? str.tostring(entryPrice, format.mintick) : "-", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 2, "Stop loss",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 2, inPos ? str.tostring(curStop, format.mintick) : "-",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 3, "Partial TP",   text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 3, inPos and usePartial ? str.tostring(tp1Price, format.mintick) : "-", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 4, "Target",       text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 4, inPos ? str.tostring(finalTP, format.mintick) : "-",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 5, "Risk ($)",     text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 5, inPos ? str.tostring(riskUsd, "#.##") : "-",            text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 6, "Open PnL ($)", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 6, str.tostring(strategy.openprofit, "#.##"),              text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-
-    table.cell(dash, 0, 7, "PERFORMANCE",  text_color=color.white, bgcolor=hc, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 7, "",             text_color=color.white, bgcolor=hc, text_size=size.small, text_halign=text.align_right)
-
-    table.cell(dash, 0, 8, "Net profit %", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 8, str.tostring(netPct, "#.##"),  text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 9, "Trades",       text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 9, str.tostring(strategy.closedtrades), text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 10, "Win %",       text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 10, str.tostring(winPct, "#.##"), text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 11, "Profit factor", text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 11, str.tostring(pf, "#.##"),     text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 12, "Max DD %",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 12, str.tostring(ddPct, "#.##"),  text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-    table.cell(dash, 0, 13, "Cooldown",    text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_left)
-    table.cell(dash, 1, 13, coolingDown ? "ON" : str.tostring(consLosses) + "/" + str.tostring(maxConsLoss), text_color=color.white, bgcolor=cb, text_size=size.small, text_halign=text.align_right)
-// =====================================================================
+// ---------------------------- Dashboard -------------------------
+var table dash = table.new(position.top_right, 2, 13, frame_width=1, frame_color=color.new(color.gray, 0), border_width=1, border_color=color.new(color.gray, 50))
+cBg  = color.new(#1e222d, 0)
+cHd  = color.new(#2a2e39, 0)
+if barstate.islast and showDash
+    trendTxt = up ? "UP" : dn ? "DOWN" : "RANGE"
+    posTxt   = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    riskUsd  = inPos ? math.abs(eEntry - eSL) * math.abs(strategy.position_size) * syminfo.pointvalue : na
+    pf       = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
+    winPct   = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
+    netPct   = strategy.netprofit / strategy.initial_capital * 100
+    ddPct    = strategy.max_drawdown / strategy.initial_capital * 100
+    posBg    = strategy.position_size > 0 ? color.new(color.green, 0) : strategy.position_size < 0 ? color.new(color.red, 0) : cBg
+    table.cell(dash, 0, 0, "HIGH WIN-RATE PRO", text_color=color.white, bgcolor=cHd, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, posTxt,             text_color=color.white, bgcolor=posBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 1, "Trend",      text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 1, trendTxt,     text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 2, "RSI",        text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 2, str.tostring(rsi, "#.#"), text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 3, "Entry",      text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 3, inPos ? str.tostring(eEntry, format.mintick) : "-", text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 4, "Stop loss",  text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 4, inPos ? str.tostring(eSL, format.mintick) : "-",    text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 5, "Target",     text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 5, inPos ? str.tostring(eTP, format.mintick) : "-",    text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 6, "Risk ($)",   text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 6, inPos ? str.tostring(riskUsd, "#.##") : "-",        text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 7, "PERFORMANCE",text_color=color.white, bgcolor=cHd, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 7, "",           text_color=color.white, bgcolor=cHd, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 8, "Net %",      text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 8, str.tostring(netPct, "#.##"), text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 9, "Win %",      text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 9, str.tostring(winPct, "#.#"),  text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 10,"Profit factor",text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 10,str.tostring(pf, "#.##"),     text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 11,"Trades",     text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 11,str.tostring(strategy.closedtrades), text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
+    table.cell(dash, 0, 12,"Max DD %",   text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 12,str.tostring(ddPct, "#.##"),  text_color=color.white, bgcolor=cBg, text_size=size.small, text_halign=text.align_right)
 // =====================================================================
