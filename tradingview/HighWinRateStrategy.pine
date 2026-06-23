@@ -1,0 +1,207 @@
+//@version=5
+// =====================================================================
+//  High Win-Rate Trend-Pullback  —  TradingView port of the MT5 EA
+//  ---------------------------------------------------------------------
+//  Strategy: trade only WITH the higher-timeframe trend, enter on RSI
+//  pullbacks into value confirmed by a momentum turn. ATR-based stops
+//  and targets, scale-out partial TP, break-even and ATR trailing stop,
+//  plus %-risk position sizing and daily loss/profit guardrails.
+//
+//  This mirrors HighWinRateBot.mq5. Some MT5-only concepts (broker spread,
+//  server fill modes) don't exist on TradingView and are omitted.
+//
+//  HOW TO USE: paste into TradingView Pine Editor -> Add to chart ->
+//  open the "Strategy Tester" tab to backtest. Forward-test before live.
+//  Educational tool, not financial advice.
+// =====================================================================
+strategy("High Win-Rate Trend-Pullback",
+     overlay              = true,
+     pyramiding           = 0,
+     initial_capital      = 1000,
+     default_qty_type     = strategy.fixed,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.0,
+     slippage             = 0,
+     calc_on_every_tick   = false,
+     process_orders_on_close = true)
+
+// ---------------------------------------------------------------------
+// Inputs — Strategy
+// ---------------------------------------------------------------------
+gStrat       = "Strategy"
+emaFastLen   = input.int(50,   "Fast EMA (swing)",        group=gStrat, minval=2)
+emaSlowLen   = input.int(200,  "Slow EMA (trend filter)", group=gStrat, minval=5)
+rsiLen       = input.int(14,   "RSI period",              group=gStrat, minval=2)
+rsiBuyZone   = input.float(40, "RSI pullback zone (long)",group=gStrat)
+rsiSellZone  = input.float(60, "RSI pullback zone (short)",group=gStrat)
+atrLen       = input.int(14,   "ATR period",              group=gStrat, minval=2)
+allowLongs   = input.bool(true,"Allow longs",             group=gStrat)
+allowShorts  = input.bool(true,"Allow shorts",            group=gStrat)
+
+// ---------------------------------------------------------------------
+// Inputs — Higher-timeframe filter
+// ---------------------------------------------------------------------
+gHtf         = "Higher-Timeframe Filter"
+useHtf       = input.bool(true,   "Require higher-TF trend agreement", group=gHtf)
+htfTf        = input.timeframe("60","Higher timeframe",                group=gHtf)
+htfEmaLen    = input.int(200,     "Higher-TF EMA period",              group=gHtf, minval=5)
+
+// ---------------------------------------------------------------------
+// Inputs — Stops & targets
+// ---------------------------------------------------------------------
+gStops       = "Stops & Targets"
+atrSlMult    = input.float(1.5, "Stop-loss = ATR x",         group=gStops, minval=0.1)
+rrRatio      = input.float(1.5, "Take-profit R:R",           group=gStops, minval=0.1)
+minAtrPoints = input.int(0,     "Min ATR in ticks (0=off)",  group=gStops, minval=0)
+
+// ---------------------------------------------------------------------
+// Inputs — Risk management
+// ---------------------------------------------------------------------
+gRisk        = "Risk Management"
+riskPercent  = input.float(1.0, "Risk % of equity per trade",   group=gRisk, minval=0.1, maxval=20)
+maxDailyLoss = input.float(4.0, "Max daily loss % (stop)",      group=gRisk, minval=0)
+dailyProfit  = input.float(6.0, "Daily profit lock % (0=off)",  group=gRisk, minval=0)
+maxTradesDay = input.int(5,     "Max trades per day (0=off)",   group=gRisk, minval=0)
+
+// ---------------------------------------------------------------------
+// Inputs — Session filter
+// ---------------------------------------------------------------------
+gSess        = "Session Filter"
+useSession   = input.bool(false,       "Restrict trading hours", group=gSess)
+sessionTime  = input.session("0700-2000","Session (exchange tz)",group=gSess)
+
+// ---------------------------------------------------------------------
+// Inputs — Trade management
+// ---------------------------------------------------------------------
+gManage      = "Trade Management"
+usePartial   = input.bool(true,  "Scale out partial at first target", group=gManage)
+partialTrigR = input.float(1.0,  "Take partial after this many R",    group=gManage, minval=0.1)
+partialPct   = input.float(50,   "% of position to close at partial", group=gManage, minval=1, maxval=99)
+useBE        = input.bool(true,  "Enable break-even",                 group=gManage)
+beTriggerR   = input.float(1.0,  "Move to BE after this many R",      group=gManage, minval=0.1)
+beLockTicks  = input.int(20,     "Ticks locked beyond entry at BE",   group=gManage, minval=0)
+useTrail     = input.bool(true,  "Enable ATR trailing stop",          group=gManage)
+trailAtrMult = input.float(2.0,  "Trailing distance = ATR x",         group=gManage, minval=0.1)
+trailStartR  = input.float(1.5,  "Start trailing after this many R",  group=gManage, minval=0.1)
+
+// ---------------------------------------------------------------------
+// Indicators
+// ---------------------------------------------------------------------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsi     = ta.rsi(close, rsiLen)
+atr     = ta.atr(atrLen)
+
+// Higher-timeframe EMA & close (confirmed values, non-repainting)
+htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, htfTf, close,                    lookahead=barmerge.lookahead_off)
+
+htfBull = not useHtf or htfClose > htfEma
+htfBear = not useHtf or htfClose < htfEma
+
+// ---------------------------------------------------------------------
+// Daily guardrails
+// ---------------------------------------------------------------------
+var float dayStartEquity = na
+var int   tradesToday    = 0
+if na(dayStartEquity)
+    dayStartEquity := strategy.equity
+
+newDay = ta.change(time("D")) != 0
+if newDay
+    dayStartEquity := strategy.equity
+    tradesToday    := 0
+
+dailyPnLPct  = dayStartEquity > 0 ? (strategy.equity - dayStartEquity) / dayStartEquity * 100 : 0.0
+lossLimitHit = maxDailyLoss > 0 and dailyPnLPct <= -maxDailyLoss
+profitLocked = dailyProfit   > 0 and dailyPnLPct >=  dailyProfit
+maxTradesHit = maxTradesDay  > 0 and tradesToday >=  maxTradesDay
+
+// Session & volatility filters
+inSession = not useSession or not na(time(timeframe.period, sessionTime))
+atrOk     = minAtrPoints <= 0 or (atr / syminfo.mintick) >= minAtrPoints
+
+canTrade  = not lossLimitHit and not profitLocked and not maxTradesHit and inSession and atrOk
+
+// ---------------------------------------------------------------------
+// Entry signals (mirrors the MT5 logic: rsi[1] = pullback, rsi = trigger)
+// ---------------------------------------------------------------------
+upTrend     = close > emaSlow and emaFast > emaSlow
+buyPullback = rsi[1] <= rsiBuyZone
+buyTrigger  = rsi > rsi[1]
+longSignal  = allowLongs and htfBull and upTrend and buyPullback and buyTrigger
+
+downTrend    = close < emaSlow and emaFast < emaSlow
+sellPullback = rsi[1] >= rsiSellZone
+sellTrigger  = rsi < rsi[1]
+shortSignal  = allowShorts and htfBear and downTrend and sellPullback and sellTrigger
+
+// ---------------------------------------------------------------------
+// Position state (persisted)
+// ---------------------------------------------------------------------
+var float entryPrice = na
+var float initStop   = na
+var float rDist      = na
+var float finalTP    = na
+var float curStop    = na
+
+flat = strategy.position_size == 0
+
+// --- LONG entry ---
+if longSignal and canTrade and flat
+    stopDist   = atrSlMult * atr
+    entryPrice := close
+    initStop   := close - stopDist
+    rDist      := stopDist
+    finalTP    := close + stopDist * rrRatio
+    curStop    := initStop
+    riskMoney  = strategy.equity * riskPercent / 100.0
+    qty        = riskMoney / (stopDist * syminfo.pointvalue)
+    strategy.entry("Long", strategy.long, qty=qty)
+    tradesToday += 1
+
+// --- SHORT entry ---
+if shortSignal and canTrade and flat
+    stopDist   = atrSlMult * atr
+    entryPrice := close
+    initStop   := close + stopDist
+    rDist      := stopDist
+    finalTP    := close - stopDist * rrRatio
+    curStop    := initStop
+    riskMoney  = strategy.equity * riskPercent / 100.0
+    qty        = riskMoney / (stopDist * syminfo.pointvalue)
+    strategy.entry("Short", strategy.short, qty=qty)
+    tradesToday += 1
+
+// ---------------------------------------------------------------------
+// Trade management: break-even -> ATR trailing, with scale-out partial
+// ---------------------------------------------------------------------
+if strategy.position_size > 0  // long open
+    if useBE and high >= entryPrice + beTriggerR * rDist
+        curStop := math.max(curStop, entryPrice + beLockTicks * syminfo.mintick)
+    if useTrail and high >= entryPrice + trailStartR * rDist
+        curStop := math.max(curStop, close - trailAtrMult * atr)
+    if usePartial
+        strategy.exit("L-TP1", from_entry="Long", qty_percent=partialPct,
+                     limit=entryPrice + partialTrigR * rDist, stop=curStop)
+    strategy.exit("L-Exit", from_entry="Long", stop=curStop, limit=finalTP)
+
+if strategy.position_size < 0  // short open
+    if useBE and low <= entryPrice - beTriggerR * rDist
+        curStop := math.min(curStop, entryPrice - beLockTicks * syminfo.mintick)
+    if useTrail and low <= entryPrice - trailStartR * rDist
+        curStop := math.min(curStop, close + trailAtrMult * atr)
+    if usePartial
+        strategy.exit("S-TP1", from_entry="Short", qty_percent=partialPct,
+                     limit=entryPrice - partialTrigR * rDist, stop=curStop)
+    strategy.exit("S-Exit", from_entry="Short", stop=curStop, limit=finalTP)
+
+// ---------------------------------------------------------------------
+// Plots
+// ---------------------------------------------------------------------
+plot(emaFast, "EMA Fast", color=color.new(color.orange, 0))
+plot(emaSlow, "EMA Slow", color=color.new(color.blue, 0), linewidth=2)
+plotshape(longSignal  and canTrade and flat, "Long",  shape.triangleup,   location.belowbar, color.new(color.green,0), size=size.small)
+plotshape(shortSignal and canTrade and flat, "Short", shape.triangledown, location.abovebar, color.new(color.red,0),   size=size.small)
+bgcolor(useSession and not inSession ? color.new(color.gray, 90) : na, title="Out of session")
+// =====================================================================
