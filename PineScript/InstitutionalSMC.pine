@@ -49,13 +49,18 @@ showBg      = input.bool(true, "Trend background", group=grpGen)
 grpMTF  = "═══ Multi-Timeframe Trend ═══"
 useMTF  = input.bool(true, "Require higher-timeframe agreement", group=grpMTF)
 trendStrict = input.bool(false, "Strict trend alignment", group=grpMTF, tooltip="ON  = a signal requires the HTFs to be aligned in its direction (trend-only, very few buys in a downtrend).\nOFF (default) = a signal is only blocked when the HTFs actively OPPOSE it, so buys and sells are treated symmetrically in neutral conditions.")
-mtfMinAgree = input.int(2, "Min higher TFs that must agree / oppose", minval=1, maxval=3, group=grpMTF, tooltip="Strict mode: how many HTFs must agree to allow a signal. Lenient mode: how many HTFs must OPPOSE to block one.")
+mtfMinAgree = input.int(2, "Min higher TFs to agree (strict mode)", minval=1, maxval=3, group=grpMTF, tooltip="Strict mode only: how many of the 3 HTFs must align with a signal to allow it. In Lenient mode a signal is blocked only when ALL 3 HTFs oppose it.")
 htfResponsive = input.bool(true, "Responsive HTF trend", group=grpMTF, tooltip="ON (default): each HTF trend is a 3-way vote = EMA50-vs-200 cross + price-vs-EMA50 + EMA50 slope. A rally reclaiming a rising EMA50 reads bullish BEFORE the slow 50/200 cross, so buys appear during recoveries instead of being locked out for days.\nOFF: classic EMA50>EMA200 only (very laggy — biased against buys after a downtrend).")
-// NOTE: defaults are tuned for a 3-5 minute base chart. Raise these if you
-// trade a higher base timeframe (e.g. 15/60/240 for a 15m chart).
-tf1     = input.timeframe("15", "HTF 1", group=grpMTF)
-tf2     = input.timeframe("30", "HTF 2", group=grpMTF)
-tf3     = input.timeframe("60", "HTF 3", group=grpMTF)
+// Auto HTFs scale the confirmation timeframes to YOUR chart, so 'higher
+// timeframe' stays proportional. On a 1m chart with x3/x8/x20 you confirm on
+// ~3m/8m/20m instead of the multi-hour 15/30/60m (which vetoes every scalp).
+autoHtf  = input.bool(true, "Auto HTFs (multiples of chart TF)", group=grpMTF, tooltip="ON (default): the 3 confirmation timeframes are derived as multiples of the chart timeframe (below). OFF: use the fixed HTF 1/2/3 timeframes.")
+htfMul1  = input.int(3,  "Auto HTF ×1", minval=2, maxval=60, group=grpMTF)
+htfMul2  = input.int(8,  "Auto HTF ×2", minval=2, maxval=120, group=grpMTF)
+htfMul3  = input.int(20, "Auto HTF ×3", minval=2, maxval=300, group=grpMTF)
+tf1     = input.timeframe("15", "HTF 1 (manual)", group=grpMTF)
+tf2     = input.timeframe("30", "HTF 2 (manual)", group=grpMTF)
+tf3     = input.timeframe("60", "HTF 3 (manual)", group=grpMTF)
 emaFastLen = input.int(50,  "Trend EMA fast", minval=2, group=grpMTF)
 emaSlowLen = input.int(200, "Trend EMA slow", minval=5, group=grpMTF)
 
@@ -199,9 +204,16 @@ f_htfTrend(_tf) =>
     dir = htfResponsive ? resp : classic
     request.security(syminfo.tickerid, _tf, dir[1], lookahead=barmerge.lookahead_on)
 
-t1 = f_htfTrend(tf1)
-t2 = f_htfTrend(tf2)
-t3 = f_htfTrend(tf3)
+// Resolve the 3 confirmation timeframes. Auto mode scales them to the chart so
+// they stay proportional on any base timeframe (e.g. 1m -> 3m/8m/20m).
+baseMin = math.max(1, math.round(timeframe.in_seconds() / 60))
+htfA = autoHtf ? str.tostring(baseMin * htfMul1) : tf1
+htfB = autoHtf ? str.tostring(baseMin * htfMul2) : tf2
+htfC = autoHtf ? str.tostring(baseMin * htfMul3) : tf3
+
+t1 = f_htfTrend(htfA)
+t2 = f_htfTrend(htfB)
+t3 = f_htfTrend(htfC)
 
 // Current-chart trend (also EMA50/200 based) for the dashboard
 emaFast = ta.ema(close, emaFastLen)
@@ -218,12 +230,12 @@ mtfBull = useMTF ? (mtfBullCnt >= mtfMinAgree and mtfBullCnt >= mtfBearCnt) : (l
 mtfBear = useMTF ? (mtfBearCnt >= mtfMinAgree and mtfBearCnt >= mtfBullCnt) : (ltfTrend == -1)
 
 // Trend GATE used by entries. This is what fixes the "sells-only" bias:
-//  * Strict mode  -> require the HTFs aligned in the signal's direction.
-//  * Lenient mode -> allow the signal unless the HTFs actively OPPOSE it
-//                    (i.e. the opposite side has >= mtfMinAgree votes). Buys
-//                    and sells are then perfectly symmetric in neutral markets.
-buyTrendOk  = not useMTF ? (ltfTrend >= 0) : (trendStrict ? mtfBull : mtfBearCnt < mtfMinAgree)
-sellTrendOk = not useMTF ? (ltfTrend <= 0) : (trendStrict ? mtfBear : mtfBullCnt < mtfMinAgree)
+//  * Strict mode  -> require >= mtfMinAgree HTFs aligned in the signal's dir.
+//  * Lenient mode -> block a signal ONLY when ALL 3 HTFs oppose it (unanimous).
+//                    A 1/3 or 2/3 mixed/recovering market therefore allows both
+//                    buys and sells — perfectly symmetric.
+buyTrendOk  = not useMTF ? (ltfTrend >= 0) : (trendStrict ? mtfBull : mtfBearCnt < 3)
+sellTrendOk = not useMTF ? (ltfTrend <= 0) : (trendStrict ? mtfBear : mtfBullCnt < 3)
 
 // ============================================================================
 //  SECTION 3 — MARKET STRUCTURE (HH / HL / LH / LL, BOS, CHoCH)
@@ -686,7 +698,7 @@ if showDash and barstate.islast
     f_row(dash, 12, "Risk:Reward",      "1:" + str.tostring(math.round(rrNow,2)), rrNow >= minRR ? colBull : color.gray)
     f_row(dash, 13, "Signal strength",  confNow >= 90 ? "STRONG" : confNow >= scoreThresh ? "Valid" : "—", confNow >= 90 ? color.orange : confNow >= scoreThresh ? colBull : color.gray)
     f_row(dash, 14, "State",            sigState, sigCol)
-    f_row(dash, 15, "Mode",             trendStrict ? "Strict trend" : "Lenient", color.silver)
+    f_row(dash, 15, "Mode / HTFs",      (trendStrict ? "Strict " : "Lenient ") + htfA + "/" + htfB + "/" + htfC, color.silver)
 
 // ============================================================================
 //  SECTION 16 — ALERTS
