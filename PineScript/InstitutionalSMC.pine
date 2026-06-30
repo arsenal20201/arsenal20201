@@ -48,10 +48,13 @@ showBg      = input.bool(true, "Trend background", group=grpGen)
 // ---- Multi-timeframe trend engine -----------------------------------------
 grpMTF  = "═══ Multi-Timeframe Trend ═══"
 useMTF  = input.bool(true, "Require higher-timeframe agreement", group=grpMTF)
-mtfMinAgree = input.int(2, "Min higher TFs that must agree", minval=1, maxval=3, group=grpMTF, tooltip="How many of the 3 higher timeframes must share the trend direction. 3 = strict trend-only (misses reversals); 2 = balanced; 1 = permissive.")
+trendStrict = input.bool(false, "Strict trend alignment", group=grpMTF, tooltip="ON  = a signal requires the HTFs to be aligned in its direction (trend-only, very few buys in a downtrend).\nOFF (default) = a signal is only blocked when the HTFs actively OPPOSE it, so buys and sells are treated symmetrically in neutral conditions.")
+mtfMinAgree = input.int(2, "Min higher TFs that must agree / oppose", minval=1, maxval=3, group=grpMTF, tooltip="Strict mode: how many HTFs must agree to allow a signal. Lenient mode: how many HTFs must OPPOSE to block one.")
+// NOTE: defaults are tuned for a 3-5 minute base chart. Raise these if you
+// trade a higher base timeframe (e.g. 15/60/240 for a 15m chart).
 tf1     = input.timeframe("15", "HTF 1", group=grpMTF)
-tf2     = input.timeframe("60", "HTF 2", group=grpMTF)
-tf3     = input.timeframe("240", "HTF 3", group=grpMTF)
+tf2     = input.timeframe("30", "HTF 2", group=grpMTF)
+tf3     = input.timeframe("60", "HTF 3", group=grpMTF)
 emaFastLen = input.int(50,  "Trend EMA fast", minval=2, group=grpMTF)
 emaSlowLen = input.int(200, "Trend EMA slow", minval=5, group=grpMTF)
 
@@ -93,10 +96,10 @@ adxMin   = input.float(25.0, "ADX minimum", minval=0.0, step=0.5, group=grpADX)
 // ---- RSI -------------------------------------------------------------------
 grpRSI  = "═══ RSI ═══"
 rsiLen     = input.int(14, "RSI length", minval=2, group=grpRSI)
-rsiBuyLo   = input.float(55.0, "Buy RSI lower", minval=0, maxval=100, group=grpRSI)
-rsiBuyHi   = input.float(70.0, "Buy RSI upper", minval=0, maxval=100, group=grpRSI)
-rsiSellLo  = input.float(30.0, "Sell RSI lower", minval=0, maxval=100, group=grpRSI)
-rsiSellHi  = input.float(45.0, "Sell RSI upper", minval=0, maxval=100, group=grpRSI)
+rsiBuyLo   = input.float(50.0, "Buy RSI lower", minval=0, maxval=100, group=grpRSI)
+rsiBuyHi   = input.float(75.0, "Buy RSI upper", minval=0, maxval=100, group=grpRSI)
+rsiSellLo  = input.float(25.0, "Sell RSI lower", minval=0, maxval=100, group=grpRSI)
+rsiSellHi  = input.float(50.0, "Sell RSI upper", minval=0, maxval=100, group=grpRSI)
 
 // ---- EMA pullback ----------------------------------------------------------
 grpPB   = "═══ EMA Pullback ═══"
@@ -202,11 +205,18 @@ ltfTrend = emaFast > emaSlow ? 1 : emaFast < emaSlow ? -1 : 0
 mtfBullCnt = (t1 == 1 ? 1 : 0) + (t2 == 1 ? 1 : 0) + (t3 == 1 ? 1 : 0)
 mtfBearCnt = (t1 == -1 ? 1 : 0) + (t2 == -1 ? 1 : 0) + (t3 == -1 ? 1 : 0)
 
-// A direction is "confirmed" when at least `mtfMinAgree` HTFs agree AND the
-// opposite direction does not have the majority. Falls back to chart trend
-// when the MTF filter is disabled.
+// A direction is "confirmed" (for the dashboard / background / score) when at
+// least `mtfMinAgree` HTFs agree and the opposite side isn't the majority.
 mtfBull = useMTF ? (mtfBullCnt >= mtfMinAgree and mtfBullCnt >= mtfBearCnt) : (ltfTrend == 1)
 mtfBear = useMTF ? (mtfBearCnt >= mtfMinAgree and mtfBearCnt >= mtfBullCnt) : (ltfTrend == -1)
+
+// Trend GATE used by entries. This is what fixes the "sells-only" bias:
+//  * Strict mode  -> require the HTFs aligned in the signal's direction.
+//  * Lenient mode -> allow the signal unless the HTFs actively OPPOSE it
+//                    (i.e. the opposite side has >= mtfMinAgree votes). Buys
+//                    and sells are then perfectly symmetric in neutral markets.
+buyTrendOk  = not useMTF ? (ltfTrend >= 0) : (trendStrict ? mtfBull : mtfBearCnt < mtfMinAgree)
+sellTrendOk = not useMTF ? (ltfTrend <= 0) : (trendStrict ? mtfBear : mtfBullCnt < mtfMinAgree)
 
 // ============================================================================
 //  SECTION 3 — MARKET STRUCTURE (HH / HL / LH / LL, BOS, CHoCH)
@@ -461,8 +471,10 @@ rrSellOk = shortRR >= minRR
 f_score(_tPts, _ha, _ms, _lq, _ob, _fvg, _vol, _adx, _atr, _rr) =>
     _tPts + (_ha ? 20 : 0) + (_ms ? 15 : 0) + (_lq ? 10 : 0) + (_ob ? 10 : 0) + (_fvg ? 10 : 0) + (_vol ? 5 : 0) + (_adx ? 5 : 0) + (_atr ? 5 : 0) + (_rr ? 5 : 0)
 
-buyTrendPts  = mtfBull ? math.round(20 * mtfBullCnt / 3.0) : 0
-sellTrendPts = mtfBear ? math.round(20 * mtfBearCnt / 3.0) : 0
+// Graded by NET HTF bias so partial / non-opposed alignment still scores
+// (full 20 only at 3-0, ~13 at 2-0, ~7 at 1-0, 0 when opposed). Symmetric.
+buyTrendPts  = math.round(20 * math.max(mtfBullCnt - mtfBearCnt, 0) / 3.0)
+sellTrendPts = math.round(20 * math.max(mtfBearCnt - mtfBullCnt, 0) / 3.0)
 buyScore  = f_score(buyTrendPts,  haBuyOk,  msBull, sweepBull or equalLows,  inBullOb, inBullFvg, volOk, adxOk, atrOk, rrBuyOk)
 sellScore = f_score(sellTrendPts, haSellOk, msBear, sweepBear or equalHighs, inBearOb, inBearFvg, volOk, adxOk, atrOk, rrSellOk)
 
@@ -473,8 +485,8 @@ sellScore = f_score(sellTrendPts, haSellOk, msBear, sweepBear or equalHighs, inB
 //  hard gate when `atrGate` is enabled; otherwise low volatility just costs
 //  score points (so early-reversal moves are not silently blocked).
 atrGateOk = not atrGate or atrOk
-buyGate  = mtfBull and haBuyOk and msBull and rsiBuyOk and vwapBuyOk and sessionOk and pullbackBuyOk and adxOk and atrGateOk and not nearRes
-sellGate = mtfBear and haSellOk and msBear and rsiSellOk and vwapSellOk and sessionOk and pullbackSellOk and adxOk and atrGateOk and not nearSup
+buyGate  = buyTrendOk  and haBuyOk  and msBull and rsiBuyOk  and vwapBuyOk  and sessionOk and pullbackBuyOk  and adxOk and atrGateOk and not nearRes
+sellGate = sellTrendOk and haSellOk and msBear and rsiSellOk and vwapSellOk and sessionOk and pullbackSellOk and adxOk and atrGateOk and not nearSup
 
 rawBuy  = buyGate  and buyScore  >= scoreThresh and rrBuyOk
 rawSell = sellGate and sellScore >= scoreThresh and rrSellOk
@@ -495,6 +507,17 @@ if msBear and lastSignalDir == 1
 
 strongBuy  = buySignal  and haStrongBull and volInstit and buyScore  >= 90
 strongSell = sellSignal and haStrongBear and volInstit and sellScore >= 90
+
+// ----------------------------------------------------------------------------
+//  Diagnostics: which gate is currently blocking each side? (dashboard)
+//  Returns the FIRST failing condition so you can see exactly why a buy/sell
+//  is not printing — no more guessing whether the indicator is "broken".
+// ----------------------------------------------------------------------------
+f_block(_trendOk, _haOk, _ms, _rsiOk, _vwapOk, _pbOk, _nearOpp, _score) =>
+    not _trendOk ? "HTF trend" : not _haOk ? "HA candles" : not _ms ? "Structure" : not _rsiOk ? "RSI" : not _vwapOk ? "VWAP" : not sessionOk ? "Session" : not _pbOk ? "Pullback" : not adxOk ? "ADX" : not atrGateOk ? "ATR" : _nearOpp ? "Near S/R" : _score < scoreThresh ? "low score" : "READY"
+
+buyBlock  = f_block(buyTrendOk,  haBuyOk,  msBull, rsiBuyOk,  vwapBuyOk,  pullbackBuyOk,  nearRes, buyScore)
+sellBlock = f_block(sellTrendOk, haSellOk, msBear, rsiSellOk, vwapSellOk, pullbackSellOk, nearSup, sellScore)
 
 // ============================================================================
 //  SECTION 13 — EXIT LOGIC + ATR TRAILING STOP
@@ -624,7 +647,7 @@ f_pos(_s) =>
 var table dash = na
 if showDash
     if na(dash)
-        dash := table.new(f_pos(dashPos), 2, 13, border_width=1, frame_color=color.new(color.gray,50), frame_width=1)
+        dash := table.new(f_pos(dashPos), 2, 16, border_width=1, frame_color=color.new(color.gray,50), frame_width=1)
 
 f_row(_t, _r, _label, _val, _col) =>
     table.cell(_t, 0, _r, _label, text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray,70), text_halign=text.align_left)
@@ -645,15 +668,18 @@ if showDash and barstate.islast
     f_row(dash, 1,  "Trend (MTF)",      trendTxt, trendCol)
     f_row(dash, 2,  "Structure",        msTxt, msBull ? colBull : msBear ? colBear : color.gray)
     f_row(dash, 3,  "Confidence",       str.tostring(math.round(confNow)) + "%", confCol)
-    f_row(dash, 4,  "Volume",           volInstit ? "INSTITUTIONAL" : volOk ? "Above avg" : "Low", volInstit ? color.orange : volOk ? colBull : color.gray)
-    f_row(dash, 5,  "ATR vs avg",       atrOk ? "Expanding" : "Low", atrOk ? colBull : color.gray)
-    f_row(dash, 6,  "ADX",              str.tostring(math.round(adx,1)), adxOk ? colBull : color.gray)
-    f_row(dash, 7,  "RSI",              str.tostring(math.round(rsi,1)), rsiBuyOk ? colBull : rsiSellOk ? colBear : color.gray)
-    f_row(dash, 8,  "VWAP",             close > vwap ? "Above" : "Below", close > vwap ? colBull : colBear)
-    f_row(dash, 9,  "Session",          sessionName, sessionOk ? colBull : color.gray)
-    f_row(dash, 10, "Risk:Reward",      "1:" + str.tostring(math.round(rrNow,2)), rrNow >= minRR ? colBull : color.gray)
-    f_row(dash, 11, "Signal strength",  confNow >= 90 ? "STRONG" : confNow >= scoreThresh ? "Valid" : "—", confNow >= 90 ? color.orange : confNow >= scoreThresh ? colBull : color.gray)
-    f_row(dash, 12, "State",            sigState, sigCol)
+    f_row(dash, 4,  "Buy score",        str.tostring(math.round(buyScore)) + "%  (" + buyBlock + ")",  buyBlock == "READY" ? colBull : color.gray)
+    f_row(dash, 5,  "Sell score",       str.tostring(math.round(sellScore)) + "%  (" + sellBlock + ")", sellBlock == "READY" ? colBear : color.gray)
+    f_row(dash, 6,  "Volume",           volInstit ? "INSTITUTIONAL" : volOk ? "Above avg" : "Low", volInstit ? color.orange : volOk ? colBull : color.gray)
+    f_row(dash, 7,  "ATR vs avg",       atrOk ? "Expanding" : "Low", atrOk ? colBull : color.gray)
+    f_row(dash, 8,  "ADX",              str.tostring(math.round(adx,1)), adxOk ? colBull : color.gray)
+    f_row(dash, 9,  "RSI",              str.tostring(math.round(rsi,1)), rsiBuyOk ? colBull : rsiSellOk ? colBear : color.gray)
+    f_row(dash, 10, "VWAP",             close > vwap ? "Above" : "Below", close > vwap ? colBull : colBear)
+    f_row(dash, 11, "Session",          sessionName, sessionOk ? colBull : color.gray)
+    f_row(dash, 12, "Risk:Reward",      "1:" + str.tostring(math.round(rrNow,2)), rrNow >= minRR ? colBull : color.gray)
+    f_row(dash, 13, "Signal strength",  confNow >= 90 ? "STRONG" : confNow >= scoreThresh ? "Valid" : "—", confNow >= 90 ? color.orange : confNow >= scoreThresh ? colBull : color.gray)
+    f_row(dash, 14, "State",            sigState, sigCol)
+    f_row(dash, 15, "Mode",             trendStrict ? "Strict trend" : "Lenient", color.silver)
 
 // ============================================================================
 //  SECTION 16 — ALERTS
