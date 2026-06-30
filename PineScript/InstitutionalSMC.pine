@@ -50,6 +50,7 @@ grpMTF  = "═══ Multi-Timeframe Trend ═══"
 useMTF  = input.bool(true, "Require higher-timeframe agreement", group=grpMTF)
 trendStrict = input.bool(false, "Strict trend alignment", group=grpMTF, tooltip="ON  = a signal requires the HTFs to be aligned in its direction (trend-only, very few buys in a downtrend).\nOFF (default) = a signal is only blocked when the HTFs actively OPPOSE it, so buys and sells are treated symmetrically in neutral conditions.")
 mtfMinAgree = input.int(2, "Min higher TFs that must agree / oppose", minval=1, maxval=3, group=grpMTF, tooltip="Strict mode: how many HTFs must agree to allow a signal. Lenient mode: how many HTFs must OPPOSE to block one.")
+htfResponsive = input.bool(true, "Responsive HTF trend", group=grpMTF, tooltip="ON (default): each HTF trend is a 3-way vote = EMA50-vs-200 cross + price-vs-EMA50 + EMA50 slope. A rally reclaiming a rising EMA50 reads bullish BEFORE the slow 50/200 cross, so buys appear during recoveries instead of being locked out for days.\nOFF: classic EMA50>EMA200 only (very laggy — biased against buys after a downtrend).")
 // NOTE: defaults are tuned for a 3-5 minute base chart. Raise these if you
 // trade a higher base timeframe (e.g. 15/60/240 for a 15m chart).
 tf1     = input.timeframe("15", "HTF 1", group=grpMTF)
@@ -189,7 +190,13 @@ haSellOk = (not haBull) and haBearRun >= haConsec
 f_htfTrend(_tf) =>
     ef = ta.ema(close, emaFastLen)
     es = ta.ema(close, emaSlowLen)
-    dir = ef > es ? 1 : ef < es ? -1 : 0
+    // Classic verdict: the slow EMA50/200 cross (very laggy).
+    classic = ef > es ? 1 : ef < es ? -1 : 0
+    // Responsive verdict: a 3-way vote so price reclaiming a rising EMA50
+    // counts as bullish before the slow cross completes (and vice-versa).
+    vote = (ef > es ? 1 : -1) + (close > ef ? 1 : -1) + (ef > ef[3] ? 1 : -1)
+    resp = vote > 0 ? 1 : vote < 0 ? -1 : 0
+    dir = htfResponsive ? resp : classic
     request.security(syminfo.tickerid, _tf, dir[1], lookahead=barmerge.lookahead_on)
 
 t1 = f_htfTrend(tf1)
