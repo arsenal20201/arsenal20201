@@ -1,3 +1,15 @@
+# Trading Toolkit
+
+This repository contains two independent trading projects:
+
+- **[PineScript/](PineScript/)** — *Institutional SMC Confluence Engine*, a
+  non-repainting **TradingView Pine Script v6** decision-support indicator that
+  only signals when a weighted confidence score reaches 80%+. See
+  [`PineScript/README.md`](PineScript/README.md).
+- **MQL5/** — *HighWinRateEA*, the MetaTrader 5 Expert Advisor documented below.
+
+---
+
 # HighWinRateEA — MT5 Trend-Pullback Expert Advisor
 
 A complete MetaTrader 5 Expert Advisor (EA) that automates a **high win-rate
@@ -134,6 +146,9 @@ Key knobs to tune for win rate vs. profitability:
 ```
 MQL5/
   Experts/
-    HighWinRateEA.mq5   # the Expert Advisor
-README.md               # this file
+    HighWinRateEA.mq5     # the MetaTrader 5 Expert Advisor
+PineScript/
+  InstitutionalSMC.pine   # the TradingView Pine v6 indicator
+  README.md               # Pine indicator documentation
+README.md                 # this file
 ```

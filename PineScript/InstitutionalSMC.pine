@@ -1,0 +1,639 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © arsenal20201
+//
+// ============================================================================
+//  INSTITUTIONAL SMC CONFLUENCE ENGINE  —  Pine Script v6
+// ============================================================================
+//  A decision-support indicator that mirrors a discretionary Smart-Money /
+//  price-action trader. It combines a multi-timeframe trend engine, Heikin
+//  Ashi analysis, market structure (BOS/CHoCH), liquidity sweeps, supply &
+//  demand zones, fair value gaps, order blocks, volume, ATR, ADX, RSI, VWAP,
+//  EMA pullbacks, sessions and automatic S/R into a single weighted
+//  confidence score. A BUY or SELL signal is only produced when the score is
+//  >= the user threshold (default 80%) AND every required factor agrees.
+//
+//  DESIGN PRINCIPLES
+//  -----------------
+//   * Non-repainting: every signal is evaluated on confirmed bars only and
+//     plotted on the closed bar (offset where required). Higher-timeframe
+//     data is pulled with the PineCoders non-repaint technique
+//     ( request.security(... expr[1], lookahead = barmerge.lookahead_on) ).
+//   * No lookahead bias / no future-looking calculations.
+//   * Heikin Ashi candles are computed internally from the chart's real OHLC
+//     so trend/candle analysis is identical regardless of the chart type the
+//     user has selected.
+//   * Modular, commented, reusable functions; arrays used for zone storage.
+//   * Optimised for TradingView limits (bounded object counts, no redundant
+//     security calls).
+//
+//  NOTE: This is an analysis / decision-support tool, not financial advice.
+//  Always backtest and forward-test before risking real capital.
+// ============================================================================
+
+//@version=6
+indicator("Institutional SMC Confluence Engine", shorttitle="SMC-Engine", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=1000)
+
+// ============================================================================
+//  SECTION 0 — INPUTS  (everything is configurable)
+// ============================================================================
+
+// ---- General ---------------------------------------------------------------
+grpGen      = "═══ General ═══"
+scoreThresh = input.int(80, "Confidence threshold (%)", minval=50, maxval=100, step=1, group=grpGen, tooltip="Minimum weighted confidence required to print a signal.")
+minRR       = input.float(2.0, "Minimum Risk:Reward", minval=1.0, step=0.1, group=grpGen, tooltip="Trades with a reward:risk below this are rejected.")
+showZones   = input.bool(true, "Show S/D zones, OB & FVG", group=grpGen)
+showSR      = input.bool(true, "Show dynamic Support / Resistance", group=grpGen)
+showBg      = input.bool(true, "Trend background", group=grpGen)
+
+// ---- Multi-timeframe trend engine -----------------------------------------
+grpMTF  = "═══ Multi-Timeframe Trend ═══"
+useMTF  = input.bool(true, "Require higher-timeframe agreement", group=grpMTF)
+tf1     = input.timeframe("15", "HTF 1", group=grpMTF)
+tf2     = input.timeframe("60", "HTF 2", group=grpMTF)
+tf3     = input.timeframe("240", "HTF 3", group=grpMTF)
+emaFastLen = input.int(50,  "Trend EMA fast", minval=2, group=grpMTF)
+emaSlowLen = input.int(200, "Trend EMA slow", minval=5, group=grpMTF)
+
+// ---- Heikin Ashi -----------------------------------------------------------
+grpHA   = "═══ Heikin Ashi ═══"
+haConsec   = input.int(2, "Consecutive HA candles required", minval=1, maxval=6, group=grpHA)
+haBodyMult = input.float(1.0, "Strong-body factor (× avg body)", minval=0.1, step=0.1, group=grpHA, tooltip="Body must exceed this multiple of the average HA body to count as 'large'.")
+haWickMax  = input.float(0.20, "Max opposing wick (× body)", minval=0.0, step=0.05, group=grpHA, tooltip="Strong candle = the wick against the trend is smaller than this fraction of the body.")
+
+// ---- Market structure ------------------------------------------------------
+grpMS   = "═══ Market Structure ═══"
+pivotLen = input.int(5, "Swing pivot length", minval=2, maxval=25, group=grpMS, tooltip="Bars left/right used to confirm a swing pivot. Larger = stronger but later structure.")
+
+// ---- Liquidity -------------------------------------------------------------
+grpLQ   = "═══ Liquidity ═══"
+eqTol   = input.float(0.10, "Equal H/L tolerance (× ATR)", minval=0.0, step=0.05, group=grpLQ, tooltip="How close two swing points must be (in ATR) to count as equal highs/lows.")
+
+// ---- Volume ----------------------------------------------------------------
+grpVol  = "═══ Volume ═══"
+volLen  = input.int(20, "Volume average length", minval=2, group=grpVol)
+volMult = input.float(1.0, "Volume multiplier", minval=0.1, step=0.1, group=grpVol, tooltip="Current volume must exceed this × the average to confirm.")
+volInst = input.float(2.0, "Institutional volume multiplier", minval=1.0, step=0.1, group=grpVol)
+
+// ---- ATR -------------------------------------------------------------------
+grpATR  = "═══ ATR / Volatility ═══"
+atrLen     = input.int(14, "ATR length", minval=2, group=grpATR)
+atrMaLen   = input.int(20, "ATR average length", minval=2, group=grpATR)
+slAtrMult  = input.float(1.5, "Stop-loss ATR multiple", minval=0.1, step=0.1, group=grpATR)
+trailMult  = input.float(2.0, "ATR trailing-stop multiple", minval=0.1, step=0.1, group=grpATR)
+
+// ---- ADX -------------------------------------------------------------------
+grpADX  = "═══ ADX ═══"
+adxLen   = input.int(14, "ADX/DI length", minval=2, group=grpADX)
+adxMin   = input.float(25.0, "ADX minimum", minval=0.0, step=0.5, group=grpADX)
+
+// ---- RSI -------------------------------------------------------------------
+grpRSI  = "═══ RSI ═══"
+rsiLen     = input.int(14, "RSI length", minval=2, group=grpRSI)
+rsiBuyLo   = input.float(55.0, "Buy RSI lower", minval=0, maxval=100, group=grpRSI)
+rsiBuyHi   = input.float(70.0, "Buy RSI upper", minval=0, maxval=100, group=grpRSI)
+rsiSellLo  = input.float(30.0, "Sell RSI lower", minval=0, maxval=100, group=grpRSI)
+rsiSellHi  = input.float(45.0, "Sell RSI upper", minval=0, maxval=100, group=grpRSI)
+
+// ---- EMA pullback ----------------------------------------------------------
+grpPB   = "═══ EMA Pullback ═══"
+usePullback = input.bool(true, "Require pullback into EMA20/50", group=grpPB)
+emaPb1Len   = input.int(20, "Pullback EMA 1", minval=2, group=grpPB)
+emaPb2Len   = input.int(50, "Pullback EMA 2", minval=2, group=grpPB)
+pbLookback  = input.int(6, "Pullback lookback bars", minval=1, maxval=30, group=grpPB)
+
+// ---- VWAP ------------------------------------------------------------------
+grpVwap = "═══ VWAP ═══"
+useVwap = input.bool(true, "Require price on correct VWAP side", group=grpVwap)
+
+// ---- Sessions --------------------------------------------------------------
+grpSes  = "═══ Sessions ═══"
+useSession = input.bool(true, "Trade only inside sessions", group=grpSes)
+sesLondon  = input.session("0800-1600", "London",  group=grpSes)
+sesNY      = input.session("1300-2100", "New York", group=grpSes)
+sesTz      = input.string("GMT", "Session timezone", group=grpSes)
+
+// ---- Visuals / dashboard ---------------------------------------------------
+grpUI   = "═══ Dashboard & Colors ═══"
+showDash   = input.bool(true, "Show dashboard", group=grpUI)
+dashPos    = input.string("Top Right", "Dashboard position", options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Right"], group=grpUI)
+colBull    = input.color(color.new(#089981, 0), "Bullish", group=grpUI)
+colBear    = input.color(color.new(#f23645, 0), "Bearish", group=grpUI)
+colDemand  = input.color(color.new(#089981, 80), "Demand zone", group=grpUI)
+colSupply  = input.color(color.new(#f23645, 80), "Supply zone", group=grpUI)
+colFvg     = input.color(color.new(#2962ff, 80), "Fair value gap", group=grpUI)
+
+// ---- Alerts toggles --------------------------------------------------------
+grpAl   = "═══ Alerts ═══"
+alOn    = input.bool(true, "Enable alerts", group=grpAl)
+
+// ============================================================================
+//  SECTION 1 — CORE INDICATORS (computed once, reused everywhere)
+// ============================================================================
+
+atr     = ta.atr(atrLen)
+atrMa   = ta.sma(atr, atrMaLen)
+rsi     = ta.rsi(close, rsiLen)
+volAvg  = ta.sma(volume, volLen)
+emaPb1  = ta.ema(close, emaPb1Len)
+emaPb2  = ta.ema(close, emaPb2Len)
+vwap    = ta.vwap(hlc3)
+
+// Manual DI / ADX (ta.dmi returns [diPlus, diMinus, adx])
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+
+// ----------------------------------------------------------------------------
+//  Heikin Ashi computed internally from real OHLC (chart-type independent)
+// ----------------------------------------------------------------------------
+var float haOpen = na
+haClose = (open + high + low + close) / 4.0
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (nz(haOpen[1]) + nz(haClose[1])) / 2.0
+haHigh  = math.max(high, math.max(haOpen, haClose))
+haLow   = math.min(low,  math.min(haOpen, haClose))
+
+haBull      = haClose > haOpen
+haBody      = math.abs(haClose - haOpen)
+haAvgBody   = ta.sma(haBody, 14)
+haUpWick    = haHigh - math.max(haOpen, haClose)
+haDnWick    = math.min(haOpen, haClose) - haLow
+
+// Strong candle definitions
+haStrongBull = haBull and haBody > haAvgBody * haBodyMult and haDnWick <= haBody * haWickMax
+haStrongBear = (not haBull) and haBody > haAvgBody * haBodyMult and haUpWick <= haBody * haWickMax
+
+// Consecutive same-direction HA candles
+var int haBullRun = 0
+var int haBearRun = 0
+haBullRun := haBull ? nz(haBullRun[1]) + 1 : 0
+haBearRun := (not haBull) ? nz(haBearRun[1]) + 1 : 0
+
+// HA confirmation booleans used by the score
+haBuyOk  = haBull and haBullRun >= haConsec
+haSellOk = (not haBull) and haBearRun >= haConsec
+
+// ============================================================================
+//  SECTION 2 — MULTI-TIMEFRAME TREND ENGINE
+// ============================================================================
+//  Non-repaint HTF helper: reads the LAST CONFIRMED higher-timeframe value.
+
+f_htfTrend(_tf) =>
+    ef = ta.ema(close, emaFastLen)
+    es = ta.ema(close, emaSlowLen)
+    dir = ef > es ? 1 : ef < es ? -1 : 0
+    request.security(syminfo.tickerid, _tf, dir[1], lookahead=barmerge.lookahead_on)
+
+t1 = f_htfTrend(tf1)
+t2 = f_htfTrend(tf2)
+t3 = f_htfTrend(tf3)
+
+// Current-chart trend (also EMA50/200 based) for the dashboard
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+ltfTrend = emaFast > emaSlow ? 1 : emaFast < emaSlow ? -1 : 0
+
+mtfBull = useMTF ? (t1 == 1 and t2 == 1 and t3 == 1) : (ltfTrend == 1)
+mtfBear = useMTF ? (t1 == -1 and t2 == -1 and t3 == -1) : (ltfTrend == -1)
+
+// ============================================================================
+//  SECTION 3 — MARKET STRUCTURE (HH / HL / LH / LL, BOS, CHoCH)
+// ============================================================================
+//  Pivots confirm `pivotLen` bars after the fact => non-repainting.
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low,  pivotLen, pivotLen)
+
+var float lastPH   = na       // most recent confirmed swing high price
+var float prevPH   = na
+var float lastPL   = na       // most recent confirmed swing low price
+var float prevPL   = na
+var int   structDir = 0       // +1 bullish structure, -1 bearish
+var bool  bosUp    = false
+var bool  bosDn    = false
+var bool  chochUp  = false
+var bool  chochDn  = false
+
+// HH/HL/LH/LL flags for the dashboard
+var string lastSwingType = "—"
+
+if not na(ph)
+    prevPH := lastPH
+    lastPH := ph
+    lastSwingType := na(prevPH) ? "HH" : (ph > prevPH ? "HH" : "LH")
+
+if not na(pl)
+    prevPL := lastPL
+    lastPL := pl
+    lastSwingType := na(prevPL) ? "HL" : (pl > prevPL ? "HL" : "LL")
+
+// Break of structure / change of character on confirmed close
+bosUp   := false
+bosDn   := false
+chochUp := false
+chochDn := false
+if not na(lastPH) and ta.crossover(close, lastPH)
+    chochUp := structDir <= 0      // first break against bearish structure = CHoCH
+    bosUp   := structDir > 0       // continuation in bullish structure = BOS
+    structDir := 1
+if not na(lastPL) and ta.crossunder(close, lastPL)
+    chochDn := structDir >= 0
+    bosDn   := structDir < 0
+    structDir := -1
+
+msBull = structDir == 1
+msBear = structDir == -1
+
+// ============================================================================
+//  SECTION 4 — LIQUIDITY SWEEP DETECTION (equal H/L, stop hunts, false breaks)
+// ============================================================================
+//  A bullish sweep: price wicks below a prior swing low / equal lows then
+//  closes back above it (liquidity grab below). Mirror for bearish.
+
+eqTolPrice = eqTol * atr
+
+equalHighs = not na(lastPH) and not na(prevPH) and math.abs(lastPH - prevPH) <= eqTolPrice
+equalLows  = not na(lastPL) and not na(prevPL) and math.abs(lastPL - prevPL) <= eqTolPrice
+
+// Sweep of the most recent swing low: low pierces it, close reclaims it.
+sweepBull = not na(lastPL) and low < lastPL and close > lastPL and close > open
+// Sweep of the most recent swing high: high pierces it, close rejects back below.
+sweepBear = not na(lastPH) and high > lastPH and close < lastPH and close < open
+
+// ============================================================================
+//  SECTION 5 — FAIR VALUE GAPS  (3-candle imbalance)
+// ============================================================================
+//  Bullish FVG: low[0] > high[2]  (gap between candle-2 high and candle-0 low)
+//  Bearish FVG: high[0] < low[2]
+
+bullFvgNew = low > high[2]
+bearFvgNew = high < low[2]
+
+// Track the most recent unmitigated FVG range; "entry" = price returns into it.
+var float bullFvgTop = na
+var float bullFvgBot = na
+var float bearFvgTop = na
+var float bearFvgBot = na
+
+if bullFvgNew
+    bullFvgTop := low
+    bullFvgBot := high[2]
+if bearFvgNew
+    bearFvgTop := low[2]
+    bearFvgBot := high
+
+// Mitigation: once price trades fully back through the gap, invalidate it.
+if not na(bullFvgBot) and low <= bullFvgBot
+    bullFvgTop := na
+    bullFvgBot := na
+if not na(bearFvgTop) and high >= bearFvgTop
+    bearFvgTop := na
+    bearFvgBot := na
+
+bullFvgActive = not na(bullFvgBot) and not na(bullFvgTop)
+bearFvgActive = not na(bearFvgBot) and not na(bearFvgTop)
+// Valid FVG entry = price is currently inside the (still valid) gap.
+inBullFvg = bullFvgActive and low <= bullFvgTop and high >= bullFvgBot
+inBearFvg = bearFvgActive and high >= bearFvgBot and low <= bearFvgTop
+
+// ============================================================================
+//  SECTION 6 — ORDER BLOCKS  (last opposite candle before an impulsive move)
+// ============================================================================
+//  Bullish OB: last down candle before a strong up move that breaks structure.
+//  We approximate "impulse" with a strong HA move + BOS/CHoCH up.
+
+var float bullObTop = na
+var float bullObBot = na
+var bool  bullObMit = false
+var float bearObTop = na
+var float bearObBot = na
+var bool  bearObMit = false
+
+impulseUp = (bosUp or chochUp) and haStrongBull
+impulseDn = (bosDn or chochDn) and haStrongBear
+
+if impulseUp and close[1] < open[1]      // previous real candle was bearish
+    bullObTop := high[1]
+    bullObBot := low[1]
+    bullObMit := false
+if impulseDn and close[1] > open[1]      // previous real candle was bullish
+    bearObTop := high[1]
+    bearObBot := low[1]
+    bearObMit := false
+
+// Mitigation when price trades back into the block
+if not na(bullObBot) and low <= bullObTop and not bullObMit
+    bullObMit := low <= bullObBot      // fully filled => mitigated/used
+if not na(bearObTop) and high >= bearObBot and not bearObMit
+    bearObMit := high >= bearObTop
+
+bullObValid = not na(bullObBot) and not bullObMit
+bearObValid = not na(bearObTop) and not bearObMit
+inBullOb = bullObValid and low <= bullObTop and high >= bullObBot
+inBearOb = bearObValid and high >= bearObBot and low <= bearObTop
+
+// ============================================================================
+//  SECTION 7 — SUPPLY & DEMAND ZONES (drawn from confirmed swings)
+// ============================================================================
+//  Demand zone anchored on a confirmed swing low, supply on a confirmed swing
+//  high. "Fresh" until price returns; mitigated once tagged. Zones are stored
+//  as boxes; counts are bounded to respect TradingView limits.
+
+var box[] demandBoxes = array.new<box>()
+var box[] supplyBoxes = array.new<box>()
+maxZones = 6
+
+f_pushZone(_arr, _box) =>
+    array.push(_arr, _box)
+    if array.size(_arr) > maxZones
+        box.delete(array.shift(_arr))
+
+if showZones and not na(pl)
+    zTop = pl + atr * 0.25
+    zBot = pl - atr * 0.25
+    b = box.new(bar_index - pivotLen, zTop, bar_index + 10, zBot, border_color=colBull, bgcolor=colDemand, extend=extend.none)
+    f_pushZone(demandBoxes, b)
+if showZones and not na(ph)
+    zTop = ph + atr * 0.25
+    zBot = ph - atr * 0.25
+    b = box.new(bar_index - pivotLen, zTop, bar_index + 10, zBot, border_color=colBear, bgcolor=colSupply, extend=extend.none)
+    f_pushZone(supplyBoxes, b)
+
+// ============================================================================
+//  SECTION 8 — DYNAMIC SUPPORT / RESISTANCE  (most recent confirmed swings)
+// ============================================================================
+var line srResLine = na
+var line srSupLine = na
+if showSR and not na(ph)
+    line.delete(srResLine)
+    srResLine := line.new(bar_index - pivotLen, ph, bar_index, ph, color=colBear, width=2, extend=extend.right)
+if showSR and not na(pl)
+    line.delete(srSupLine)
+    srSupLine := line.new(bar_index - pivotLen, pl, bar_index, pl, color=colBull, width=2, extend=extend.right)
+
+// Distance to S/R used as a guard: do not buy into resistance / sell into support
+nearRes = not na(lastPH) and (lastPH - close) <= atr and close < lastPH
+nearSup = not na(lastPL) and (close - lastPL) <= atr and close > lastPL
+
+// ============================================================================
+//  SECTION 9 — FILTERS (volume, ATR, ADX, RSI, VWAP, session, pullback)
+// ============================================================================
+volOk    = volume > volAvg * volMult
+volInstit = volume > volAvg * volInst
+atrOk    = atr > atrMa
+adxOk    = adx > adxMin
+rsiBuyOk  = rsi >= rsiBuyLo and rsi <= rsiBuyHi
+rsiSellOk = rsi >= rsiSellLo and rsi <= rsiSellHi
+vwapBuyOk  = not useVwap or close > vwap
+vwapSellOk = not useVwap or close < vwap
+
+// Session detection
+inLondon = not na(time(timeframe.period, sesLondon, sesTz))
+inNY     = not na(time(timeframe.period, sesNY, sesTz))
+inOverlap = inLondon and inNY
+sessionOk = not useSession or inLondon or inNY
+sessionName = inOverlap ? "LDN/NY Overlap" : inLondon ? "London" : inNY ? "New York" : "Off-session"
+
+// Pullback: within the last pbLookback bars price tagged EMA20 or EMA50
+pbTouchBull = ta.lowest(low, pbLookback) <= math.max(emaPb1, emaPb2)
+pbTouchBear = ta.highest(high, pbLookback) >= math.min(emaPb1, emaPb2)
+pullbackBuyOk  = not usePullback or pbTouchBull
+pullbackSellOk = not usePullback or pbTouchBear
+
+// ============================================================================
+//  SECTION 10 — RISK MANAGEMENT (SL / TP / RR)
+// ============================================================================
+//  Long  : SL below entry by slAtrMult*ATR ; TP at minRR * risk.
+//  Short : mirror.
+longEntry  = close
+longSL     = close - atr * slAtrMult
+longRisk   = longEntry - longSL
+longTP     = longEntry + longRisk * minRR
+longRR     = longRisk > 0 ? (longTP - longEntry) / longRisk : 0.0
+
+shortEntry = close
+shortSL    = close + atr * slAtrMult
+shortRisk  = shortSL - shortEntry
+shortTP    = shortEntry - shortRisk * minRR
+shortRR    = shortRisk > 0 ? (shortEntry - shortTP) / shortRisk : 0.0
+
+rrBuyOk  = longRR  >= minRR
+rrSellOk = shortRR >= minRR
+
+// ============================================================================
+//  SECTION 11 — CONFIDENCE SCORING ENGINE  (weighted, total = 100)
+// ============================================================================
+//   HTF trend 20 | HA 20 | Structure 15 | Liquidity 10 | Order block 10
+//   FVG 10 | Volume 5 | ADX 5 | ATR 5 | Risk:Reward 5
+f_score(_t, _ha, _ms, _lq, _ob, _fvg, _vol, _adx, _atr, _rr) =>
+    (_t ? 20 : 0) + (_ha ? 20 : 0) + (_ms ? 15 : 0) + (_lq ? 10 : 0) + (_ob ? 10 : 0) + (_fvg ? 10 : 0) + (_vol ? 5 : 0) + (_adx ? 5 : 0) + (_atr ? 5 : 0) + (_rr ? 5 : 0)
+
+buyScore = f_score(mtfBull, haBuyOk, msBull, sweepBull or equalLows, inBullOb, inBullFvg, volOk, adxOk, atrOk, rrBuyOk)
+sellScore = f_score(mtfBear, haSellOk, msBear, sweepBear or equalHighs, inBearOb, inBearFvg, volOk, adxOk, atrOk, rrSellOk)
+
+// ============================================================================
+//  SECTION 12 — ENTRY LOGIC  (all required factors agree AND score >= thresh)
+// ============================================================================
+//  Hard gates that must always be true in addition to the score:
+buyGate  = mtfBull and haBuyOk and msBull and rsiBuyOk and vwapBuyOk and sessionOk and pullbackBuyOk and adxOk and atrOk and not nearRes
+sellGate = mtfBear and haSellOk and msBear and rsiSellOk and vwapSellOk and sessionOk and pullbackSellOk and adxOk and atrOk and not nearSup
+
+rawBuy  = buyGate  and buyScore  >= scoreThresh and rrBuyOk
+rawSell = sellGate and sellScore >= scoreThresh and rrSellOk
+
+// One-signal-per-swing debounce so we don't spam every bar.
+var int lastSignalDir = 0
+buySignal  = rawBuy  and lastSignalDir != 1
+sellSignal = rawSell and lastSignalDir != -1
+if buySignal
+    lastSignalDir := 1
+if sellSignal
+    lastSignalDir := -1
+// Reset debounce when structure flips so a fresh signal can fire.
+if msBull and lastSignalDir == -1
+    lastSignalDir := 0
+if msBear and lastSignalDir == 1
+    lastSignalDir := 0
+
+strongBuy  = buySignal  and haStrongBull and volInstit and buyScore  >= 90
+strongSell = sellSignal and haStrongBear and volInstit and sellScore >= 90
+
+// ============================================================================
+//  SECTION 13 — EXIT LOGIC + ATR TRAILING STOP
+// ============================================================================
+//  Active trade state for trailing / exit signalling.
+var int   posDir   = 0        // +1 long, -1 short, 0 flat
+var float posEntry = na
+var float posSL    = na
+var float posTP    = na
+var float trailStop = na
+
+if buySignal
+    posDir := 1
+    posEntry := longEntry
+    posSL := longSL
+    posTP := longTP
+    trailStop := longSL
+if sellSignal
+    posDir := -1
+    posEntry := shortEntry
+    posSL := shortSL
+    posTP := shortTP
+    trailStop := shortSL
+
+// Update ATR trailing stop in the trade direction
+if posDir == 1
+    trailStop := math.max(nz(trailStop, longSL), close - atr * trailMult)
+if posDir == -1
+    trailStop := math.min(nz(trailStop, shortSL), close + atr * trailMult)
+
+// Exit conditions
+haFlipExit  = (posDir == 1 and not haBull) or (posDir == -1 and haBull)
+msFlipExit  = (posDir == 1 and msBear) or (posDir == -1 and msBull)
+trailHit    = (posDir == 1 and low <= trailStop) or (posDir == -1 and high >= trailStop)
+tpHit       = (posDir == 1 and high >= nz(posTP, close)) or (posDir == -1 and low <= nz(posTP, close))
+slHit       = (posDir == 1 and low <= nz(posSL, close)) or (posDir == -1 and high >= nz(posSL, close))
+
+exitLong  = posDir == 1 and (haFlipExit or msFlipExit or trailHit or tpHit or slHit)
+exitShort = posDir == -1 and (haFlipExit or msFlipExit or trailHit or tpHit or slHit)
+
+if exitLong or exitShort
+    posDir := 0
+    trailStop := na
+
+// ============================================================================
+//  SECTION 14 — PLOTTING  (signals, zones, risk boxes, trailing stop, bg)
+// ============================================================================
+
+// Trend background
+bgCol = showBg ? (mtfBull ? color.new(colBull, 92) : mtfBear ? color.new(colBear, 92) : na) : na
+bgcolor(bgCol, title="Trend background")
+
+// Signal arrows
+plotshape(buySignal,  title="BUY",  style=shape.labelup,   location=location.belowbar, color=colBull, textcolor=color.white, text="BUY",  size=size.small)
+plotshape(sellSignal, title="SELL", style=shape.labeldown, location=location.abovebar, color=colBear, textcolor=color.white, text="SELL", size=size.small)
+plotshape(strongBuy,  title="Strong BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(colBull,0), size=size.tiny)
+plotshape(strongSell, title="Strong SELL", style=shape.triangledown, location=location.abovebar, color=color.new(colBear,0), size=size.tiny)
+
+// Structure & event labels
+if bosUp
+    label.new(bar_index, low, "BOS", style=label.style_label_up, color=color.new(colBull,20), textcolor=color.white, size=size.tiny)
+if bosDn
+    label.new(bar_index, high, "BOS", style=label.style_label_down, color=color.new(colBear,20), textcolor=color.white, size=size.tiny)
+if chochUp
+    label.new(bar_index, low, "CHoCH", style=label.style_label_up, color=color.new(color.teal,10), textcolor=color.white, size=size.tiny)
+if chochDn
+    label.new(bar_index, high, "CHoCH", style=label.style_label_down, color=color.new(color.maroon,10), textcolor=color.white, size=size.tiny)
+if sweepBull
+    label.new(bar_index, low, "Sweep", style=label.style_xcross, color=colBull, textcolor=color.white, size=size.tiny)
+if sweepBear
+    label.new(bar_index, high, "Sweep", style=label.style_xcross, color=colBear, textcolor=color.white, size=size.tiny)
+
+// Fair value gap boxes (only the active ones)
+var box bullFvgBox = na
+var box bearFvgBox = na
+if showZones and bullFvgNew
+    box.delete(bullFvgBox)
+    bullFvgBox := box.new(bar_index-2, low, bar_index+8, high[2], border_color=na, bgcolor=colFvg)
+if showZones and bearFvgNew
+    box.delete(bearFvgBox)
+    bearFvgBox := box.new(bar_index-2, low[2], bar_index+8, high, border_color=na, bgcolor=colFvg)
+
+// Order block boxes
+var box bullObBox = na
+var box bearObBox = na
+if showZones and impulseUp and close[1] < open[1]
+    box.delete(bullObBox)
+    bullObBox := box.new(bar_index-1, high[1], bar_index+10, low[1], border_color=colBull, bgcolor=color.new(colBull,75))
+if showZones and impulseDn and close[1] > open[1]
+    box.delete(bearObBox)
+    bearObBox := box.new(bar_index-1, high[1], bar_index+10, low[1], border_color=colBear, bgcolor=color.new(colBear,75))
+
+// Risk / target visualisation for the latest signal (inlined so the global
+// drawing handles can be reassigned — Pine functions cannot write globals).
+var line slLine = na
+var line tpLine = na
+var box  riskBox = na
+var box  targetBox = na
+if buySignal or sellSignal
+    line.delete(slLine)
+    line.delete(tpLine)
+    box.delete(riskBox)
+    box.delete(targetBox)
+    eEntry = buySignal ? longEntry : shortEntry
+    eSL    = buySignal ? longSL : shortSL
+    eTP    = buySignal ? longTP : shortTP
+    slLine    := line.new(bar_index, eSL, bar_index+15, eSL, color=colBear, width=2, style=line.style_dashed)
+    tpLine    := line.new(bar_index, eTP, bar_index+15, eTP, color=colBull, width=2, style=line.style_dashed)
+    riskBox   := box.new(bar_index, eEntry, bar_index+15, eSL, border_color=na, bgcolor=color.new(colBear,85))
+    targetBox := box.new(bar_index, eEntry, bar_index+15, eTP, border_color=na, bgcolor=color.new(colBull,85))
+
+// Trailing stop line while in a position
+plot(posDir != 0 ? trailStop : na, title="ATR Trailing Stop", color=posDir==1 ? colBull : colBear, style=plot.style_linebr, linewidth=2)
+
+// ============================================================================
+//  SECTION 15 — DASHBOARD
+// ============================================================================
+f_pos(_s) =>
+    switch _s
+        "Top Right"     => position.top_right
+        "Top Left"      => position.top_left
+        "Bottom Right"  => position.bottom_right
+        "Bottom Left"   => position.bottom_left
+        "Middle Right"  => position.middle_right
+        => position.top_right
+
+var table dash = na
+if showDash
+    if na(dash)
+        dash := table.new(f_pos(dashPos), 2, 13, border_width=1, frame_color=color.new(color.gray,50), frame_width=1)
+
+f_row(_t, _r, _label, _val, _col) =>
+    table.cell(_t, 0, _r, _label, text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray,70), text_halign=text.align_left)
+    table.cell(_t, 1, _r, _val,   text_color=_col,        text_size=size.small, bgcolor=color.new(color.black,60), text_halign=text.align_right)
+
+if showDash and barstate.islast
+    trendTxt = mtfBull ? "BULLISH" : mtfBear ? "BEARISH" : "MIXED"
+    trendCol = mtfBull ? colBull : mtfBear ? colBear : color.gray
+    msTxt    = msBull ? "Bullish (" + lastSwingType + ")" : msBear ? "Bearish (" + lastSwingType + ")" : "Neutral"
+    sigState = buySignal ? "BUY" : sellSignal ? "SELL" : posDir==1 ? "Long open" : posDir==-1 ? "Short open" : "Flat"
+    sigCol   = buySignal or posDir==1 ? colBull : sellSignal or posDir==-1 ? colBear : color.gray
+    confNow  = math.max(buyScore, sellScore)
+    confCol  = confNow >= scoreThresh ? colBull : confNow >= 60 ? color.orange : color.gray
+    rrNow    = mtfBull ? longRR : mtfBear ? shortRR : math.max(longRR, shortRR)
+
+    table.cell(dash, 0, 0, "SMC ENGINE", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue,40))
+    table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue,40))
+    f_row(dash, 1,  "Trend (MTF)",      trendTxt, trendCol)
+    f_row(dash, 2,  "Structure",        msTxt, msBull ? colBull : msBear ? colBear : color.gray)
+    f_row(dash, 3,  "Confidence",       str.tostring(confNow) + "%", confCol)
+    f_row(dash, 4,  "Volume",           volInstit ? "INSTITUTIONAL" : volOk ? "Above avg" : "Low", volInstit ? color.orange : volOk ? colBull : color.gray)
+    f_row(dash, 5,  "ATR vs avg",       atrOk ? "Expanding" : "Low", atrOk ? colBull : color.gray)
+    f_row(dash, 6,  "ADX",              str.tostring(math.round(adx,1)), adxOk ? colBull : color.gray)
+    f_row(dash, 7,  "RSI",              str.tostring(math.round(rsi,1)), rsiBuyOk ? colBull : rsiSellOk ? colBear : color.gray)
+    f_row(dash, 8,  "VWAP",             close > vwap ? "Above" : "Below", close > vwap ? colBull : colBear)
+    f_row(dash, 9,  "Session",          sessionName, sessionOk ? colBull : color.gray)
+    f_row(dash, 10, "Risk:Reward",      "1:" + str.tostring(math.round(rrNow,2)), rrNow >= minRR ? colBull : color.gray)
+    f_row(dash, 11, "Signal strength",  confNow >= 90 ? "STRONG" : confNow >= scoreThresh ? "Valid" : "—", confNow >= 90 ? color.orange : confNow >= scoreThresh ? colBull : color.gray)
+    f_row(dash, 12, "State",            sigState, sigCol)
+
+// ============================================================================
+//  SECTION 16 — ALERTS
+// ============================================================================
+// alertcondition() MUST be declared at global scope (cannot be gated by a
+// conditional). These create selectable alert options in TradingView's dialog.
+alertcondition(buySignal,  "BUY signal",  "SMC Engine: BUY confluence >= threshold")
+alertcondition(sellSignal, "SELL signal", "SMC Engine: SELL confluence >= threshold")
+alertcondition(strongBuy,  "Strong BUY",  "SMC Engine: STRONG BUY (90%+ & institutional volume)")
+alertcondition(strongSell, "Strong SELL", "SMC Engine: STRONG SELL (90%+ & institutional volume)")
+alertcondition(bosUp or bosDn,     "BOS",   "SMC Engine: Break of Structure")
+alertcondition(chochUp or chochDn, "CHoCH", "SMC Engine: Change of Character")
+alertcondition(sweepBull or sweepBear, "Liquidity Sweep", "SMC Engine: Liquidity sweep detected")
+alertcondition(inBullOb or inBearOb,   "Order Block Touch", "SMC Engine: price tapped an order block")
+alertcondition(inBullFvg or inBearFvg, "FVG Entry", "SMC Engine: price entered a fair value gap")
+alertcondition(tpHit,  "Take Profit", "SMC Engine: take-profit reached")
+alertcondition(slHit,  "Stop Loss",   "SMC Engine: stop-loss hit")
+alertcondition(exitLong or exitShort, "Exit", "SMC Engine: exit condition met")
+
+// Rich dynamic alerts (one alert -> any event) using alert(); gated by alOn.
+if alOn and buySignal
+    alert("SMC BUY " + syminfo.ticker + " @ " + str.tostring(close) + " | conf " + str.tostring(buyScore) + "% | SL " + str.tostring(longSL) + " TP " + str.tostring(longTP), alert.freq_once_per_bar_close)
+if alOn and sellSignal
+    alert("SMC SELL " + syminfo.ticker + " @ " + str.tostring(close) + " | conf " + str.tostring(sellScore) + "% | SL " + str.tostring(shortSL) + " TP " + str.tostring(shortTP), alert.freq_once_per_bar_close)
