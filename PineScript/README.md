@@ -115,13 +115,51 @@ Order Block Touch, FVG Entry, Take Profit, Stop Loss, Exit.
 
 ---
 
+## 6b. Tuning — clutter vs. missed signals
+
+The engine deliberately favours quality over quantity, but two settings control
+the trade-off most people need to adjust:
+
+**If structure looks noisy (too many BOS / CHoCH):** each swing level now fires
+**at most one** break event (internal *broken* flags), so the main lever is
+**`Swing pivot length`** (default **8**). Raise it (12–20) for fewer, cleaner,
+higher-timeframe swings; lower it for more reactive structure. You can also hide
+labels with **`Show BOS / CHoCH labels`** and **`Show liquidity-sweep labels`**.
+
+**If it misses obvious moves / gives no signals — check the dashboard first.**
+Every greyed-out row is a filter that is currently blocking a signal. The usual
+culprits:
+
+| Symptom on dashboard | Cause | Fix |
+|---|---|---|
+| Trend (MTF) = BEARISH during an up-move | All 3 higher TFs (EMA50/200) must align; a reversal off the lows fights a still-bearish 4H EMA200 | Lower **`Min higher TFs that must agree`** to **2** (default) or **1** for reversals |
+| Session = Off-session | Session filter blocked the move | Session filter is **off by default** now; only enable it (and set the timezone) for FX/index session trading |
+| ATR vs avg = Low | Volatility filter | ATR is **score-only by default**; enable *ATR is a hard filter* only if you want it to block |
+| Near a swing high/low | S/R guard | It now ignores **already-broken** levels, so breakouts pass; toggle off via *S/R Guard* |
+
+> The original "all 3 HTFs must agree on EMA50/200" rule is pure trend-following
+> and structurally **cannot** signal a reversal until the higher-timeframe
+> EMA200 flips (hours later). Min-agree = 2 keeps a strong bias while letting
+> early continuation/reversal setups through.
+
+---
+
 ## 8. Inputs (all configurable)
 
 Grouped in the settings panel: General, Multi-Timeframe Trend, Heikin Ashi,
 Market Structure, Liquidity, Volume, ATR, ADX, RSI, EMA Pullback, VWAP,
-Sessions, Dashboard & Colors, Alerts — covering EMA lengths, RSI bounds, ADX
-threshold, ATR/volume multipliers, session windows, RR, score threshold,
-timeframes, colours, dashboard position and alert toggles.
+S/R Guard, Sessions, Dashboard & Colors, Alerts — covering EMA lengths, RSI
+bounds, ADX threshold, ATR/volume multipliers, session windows, RR, score
+threshold, timeframes, colours, dashboard position and alert toggles.
+
+Key tuning inputs added for signal/clutter control:
+- **Min higher TFs that must agree** (1–3, default 2) — relaxes the strict
+  trend gate so reversals can signal.
+- **Swing pivot length** (default 8) — primary clutter control for structure.
+- **Show BOS / CHoCH labels**, **Show liquidity-sweep labels** — declutter.
+- **ATR is a hard filter** (default off) — keep ATR as score-only.
+- **S/R Guard** (default on, ignores broken levels).
+- **Trade only inside sessions** (default off).
 
 ---
 

@@ -48,6 +48,7 @@ showBg      = input.bool(true, "Trend background", group=grpGen)
 // ---- Multi-timeframe trend engine -----------------------------------------
 grpMTF  = "═══ Multi-Timeframe Trend ═══"
 useMTF  = input.bool(true, "Require higher-timeframe agreement", group=grpMTF)
+mtfMinAgree = input.int(2, "Min higher TFs that must agree", minval=1, maxval=3, group=grpMTF, tooltip="How many of the 3 higher timeframes must share the trend direction. 3 = strict trend-only (misses reversals); 2 = balanced; 1 = permissive.")
 tf1     = input.timeframe("15", "HTF 1", group=grpMTF)
 tf2     = input.timeframe("60", "HTF 2", group=grpMTF)
 tf3     = input.timeframe("240", "HTF 3", group=grpMTF)
@@ -62,7 +63,9 @@ haWickMax  = input.float(0.20, "Max opposing wick (× body)", minval=0.0, step=0
 
 // ---- Market structure ------------------------------------------------------
 grpMS   = "═══ Market Structure ═══"
-pivotLen = input.int(5, "Swing pivot length", minval=2, maxval=25, group=grpMS, tooltip="Bars left/right used to confirm a swing pivot. Larger = stronger but later structure.")
+pivotLen   = input.int(8, "Swing pivot length", minval=2, maxval=50, group=grpMS, tooltip="Bars left/right used to confirm a swing pivot. Larger = fewer, stronger, less noisy swings (but later).")
+showStruct = input.bool(true, "Show BOS / CHoCH labels", group=grpMS)
+showSweeps = input.bool(true, "Show liquidity-sweep labels", group=grpMS)
 
 // ---- Liquidity -------------------------------------------------------------
 grpLQ   = "═══ Liquidity ═══"
@@ -78,6 +81,7 @@ volInst = input.float(2.0, "Institutional volume multiplier", minval=1.0, step=0
 grpATR  = "═══ ATR / Volatility ═══"
 atrLen     = input.int(14, "ATR length", minval=2, group=grpATR)
 atrMaLen   = input.int(20, "ATR average length", minval=2, group=grpATR)
+atrGate    = input.bool(false, "ATR is a hard filter (else score-only)", group=grpATR, tooltip="When off, low volatility only lowers the score instead of blocking the signal — lets early-reversal moves through.")
 slAtrMult  = input.float(1.5, "Stop-loss ATR multiple", minval=0.1, step=0.1, group=grpATR)
 trailMult  = input.float(2.0, "ATR trailing-stop multiple", minval=0.1, step=0.1, group=grpATR)
 
@@ -105,9 +109,13 @@ pbLookback  = input.int(6, "Pullback lookback bars", minval=1, maxval=30, group=
 grpVwap = "═══ VWAP ═══"
 useVwap = input.bool(true, "Require price on correct VWAP side", group=grpVwap)
 
+// ---- S/R guard -------------------------------------------------------------
+grpSRg  = "═══ S/R Guard ═══"
+avoidSR = input.bool(true, "Block buys into resistance / sells into support", group=grpSRg, tooltip="Uses only swing levels that have NOT yet been broken, so a valid breakout/continuation is not blocked.")
+
 // ---- Sessions --------------------------------------------------------------
 grpSes  = "═══ Sessions ═══"
-useSession = input.bool(true, "Trade only inside sessions", group=grpSes)
+useSession = input.bool(false, "Trade only inside sessions", group=grpSes, tooltip="Off by default so off-session/24h moves are not silently blocked. Enable and set the timezone for FX/index session trading.")
 sesLondon  = input.session("0800-1600", "London",  group=grpSes)
 sesNY      = input.session("1300-2100", "New York", group=grpSes)
 sesTz      = input.string("GMT", "Session timezone", group=grpSes)
@@ -190,8 +198,15 @@ emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
 ltfTrend = emaFast > emaSlow ? 1 : emaFast < emaSlow ? -1 : 0
 
-mtfBull = useMTF ? (t1 == 1 and t2 == 1 and t3 == 1) : (ltfTrend == 1)
-mtfBear = useMTF ? (t1 == -1 and t2 == -1 and t3 == -1) : (ltfTrend == -1)
+// Count how many higher timeframes agree in each direction.
+mtfBullCnt = (t1 == 1 ? 1 : 0) + (t2 == 1 ? 1 : 0) + (t3 == 1 ? 1 : 0)
+mtfBearCnt = (t1 == -1 ? 1 : 0) + (t2 == -1 ? 1 : 0) + (t3 == -1 ? 1 : 0)
+
+// A direction is "confirmed" when at least `mtfMinAgree` HTFs agree AND the
+// opposite direction does not have the majority. Falls back to chart trend
+// when the MTF filter is disabled.
+mtfBull = useMTF ? (mtfBullCnt >= mtfMinAgree and mtfBullCnt >= mtfBearCnt) : (ltfTrend == 1)
+mtfBear = useMTF ? (mtfBearCnt >= mtfMinAgree and mtfBearCnt >= mtfBullCnt) : (ltfTrend == -1)
 
 // ============================================================================
 //  SECTION 3 — MARKET STRUCTURE (HH / HL / LH / LL, BOS, CHoCH)
@@ -206,37 +221,53 @@ var float prevPH   = na
 var float lastPL   = na       // most recent confirmed swing low price
 var float prevPL   = na
 var int   structDir = 0       // +1 bullish structure, -1 bearish
+// "Broken" flags ensure a level produces at most ONE break event. They reset
+// only when a NEW pivot of that side confirms — this is what stops BOS/CHoCH
+// from re-firing on every minor re-cross of the same level (the clutter fix).
+var bool  phBroken = true
+var bool  plBroken = true
 var bool  bosUp    = false
 var bool  bosDn    = false
 var bool  chochUp  = false
 var bool  chochDn  = false
 
-// HH/HL/LH/LL flags for the dashboard
+// HH/HL/LH/LL classification for the dashboard
 var string lastSwingType = "—"
 
+// A new swing high resets the high-break flag and reclassifies structure.
 if not na(ph)
     prevPH := lastPH
     lastPH := ph
+    phBroken := false
     lastSwingType := na(prevPH) ? "HH" : (ph > prevPH ? "HH" : "LH")
 
 if not na(pl)
     prevPL := lastPL
     lastPL := pl
+    plBroken := false
     lastSwingType := na(prevPL) ? "HL" : (pl > prevPL ? "HL" : "LL")
 
-// Break of structure / change of character on confirmed close
+// Reset every bar; only set true on the bar a fresh, unbroken level breaks.
 bosUp   := false
 bosDn   := false
 chochUp := false
 chochDn := false
-if not na(lastPH) and ta.crossover(close, lastPH)
-    chochUp := structDir <= 0      // first break against bearish structure = CHoCH
-    bosUp   := structDir > 0       // continuation in bullish structure = BOS
+
+// Bullish break: a close above the latest UNBROKEN swing high.
+//   - against bearish structure  => CHoCH (reversal)
+//   - within bullish structure    => BOS  (continuation)
+if not na(lastPH) and not phBroken and close > lastPH
+    chochUp  := structDir < 0
+    bosUp    := structDir >= 0
     structDir := 1
-if not na(lastPL) and ta.crossunder(close, lastPL)
-    chochDn := structDir >= 0
-    bosDn   := structDir < 0
+    phBroken := true
+
+// Bearish break: a close below the latest UNBROKEN swing low.
+if not na(lastPL) and not plBroken and close < lastPL
+    chochDn  := structDir > 0
+    bosDn    := structDir <= 0
     structDir := -1
+    plBroken := true
 
 msBull = structDir == 1
 msBear = structDir == -1
@@ -368,9 +399,12 @@ if showSR and not na(pl)
     line.delete(srSupLine)
     srSupLine := line.new(bar_index - pivotLen, pl, bar_index, pl, color=colBull, width=2, extend=extend.right)
 
-// Distance to S/R used as a guard: do not buy into resistance / sell into support
-nearRes = not na(lastPH) and (lastPH - close) <= atr and close < lastPH
-nearSup = not na(lastPL) and (close - lastPL) <= atr and close > lastPL
+// Distance to S/R used as a guard: do not buy into resistance / sell into
+// support. Only levels that are still UNBROKEN count as obstacles — a level we
+// have already closed through is no longer resistance/support, so a genuine
+// breakout/continuation entry is not blocked. Toggleable via `avoidSR`.
+nearRes = avoidSR and not na(lastPH) and not phBroken and (lastPH - close) <= atr and close < lastPH
+nearSup = avoidSR and not na(lastPL) and not plBroken and (close - lastPL) <= atr and close > lastPL
 
 // ============================================================================
 //  SECTION 9 — FILTERS (volume, ATR, ADX, RSI, VWAP, session, pullback)
@@ -422,18 +456,25 @@ rrSellOk = shortRR >= minRR
 // ============================================================================
 //   HTF trend 20 | HA 20 | Structure 15 | Liquidity 10 | Order block 10
 //   FVG 10 | Volume 5 | ADX 5 | ATR 5 | Risk:Reward 5
-f_score(_t, _ha, _ms, _lq, _ob, _fvg, _vol, _adx, _atr, _rr) =>
-    (_t ? 20 : 0) + (_ha ? 20 : 0) + (_ms ? 15 : 0) + (_lq ? 10 : 0) + (_ob ? 10 : 0) + (_fvg ? 10 : 0) + (_vol ? 5 : 0) + (_adx ? 5 : 0) + (_atr ? 5 : 0) + (_rr ? 5 : 0)
+//  The trend term is graded: full 20 only when all 3 HTFs align, scaled down
+//  for partial agreement so a 2/3 reversal setup scores honestly lower.
+f_score(_tPts, _ha, _ms, _lq, _ob, _fvg, _vol, _adx, _atr, _rr) =>
+    _tPts + (_ha ? 20 : 0) + (_ms ? 15 : 0) + (_lq ? 10 : 0) + (_ob ? 10 : 0) + (_fvg ? 10 : 0) + (_vol ? 5 : 0) + (_adx ? 5 : 0) + (_atr ? 5 : 0) + (_rr ? 5 : 0)
 
-buyScore = f_score(mtfBull, haBuyOk, msBull, sweepBull or equalLows, inBullOb, inBullFvg, volOk, adxOk, atrOk, rrBuyOk)
-sellScore = f_score(mtfBear, haSellOk, msBear, sweepBear or equalHighs, inBearOb, inBearFvg, volOk, adxOk, atrOk, rrSellOk)
+buyTrendPts  = mtfBull ? math.round(20 * mtfBullCnt / 3.0) : 0
+sellTrendPts = mtfBear ? math.round(20 * mtfBearCnt / 3.0) : 0
+buyScore  = f_score(buyTrendPts,  haBuyOk,  msBull, sweepBull or equalLows,  inBullOb, inBullFvg, volOk, adxOk, atrOk, rrBuyOk)
+sellScore = f_score(sellTrendPts, haSellOk, msBear, sweepBear or equalHighs, inBearOb, inBearFvg, volOk, adxOk, atrOk, rrSellOk)
 
 // ============================================================================
 //  SECTION 12 — ENTRY LOGIC  (all required factors agree AND score >= thresh)
 // ============================================================================
-//  Hard gates that must always be true in addition to the score:
-buyGate  = mtfBull and haBuyOk and msBull and rsiBuyOk and vwapBuyOk and sessionOk and pullbackBuyOk and adxOk and atrOk and not nearRes
-sellGate = mtfBear and haSellOk and msBear and rsiSellOk and vwapSellOk and sessionOk and pullbackSellOk and adxOk and atrOk and not nearSup
+//  Hard gates that must always be true in addition to the score. ATR is only a
+//  hard gate when `atrGate` is enabled; otherwise low volatility just costs
+//  score points (so early-reversal moves are not silently blocked).
+atrGateOk = not atrGate or atrOk
+buyGate  = mtfBull and haBuyOk and msBull and rsiBuyOk and vwapBuyOk and sessionOk and pullbackBuyOk and adxOk and atrGateOk and not nearRes
+sellGate = mtfBear and haSellOk and msBear and rsiSellOk and vwapSellOk and sessionOk and pullbackSellOk and adxOk and atrGateOk and not nearSup
 
 rawBuy  = buyGate  and buyScore  >= scoreThresh and rrBuyOk
 rawSell = sellGate and sellScore >= scoreThresh and rrSellOk
@@ -512,18 +553,18 @@ plotshape(sellSignal, title="SELL", style=shape.labeldown, location=location.abo
 plotshape(strongBuy,  title="Strong BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(colBull,0), size=size.tiny)
 plotshape(strongSell, title="Strong SELL", style=shape.triangledown, location=location.abovebar, color=color.new(colBear,0), size=size.tiny)
 
-// Structure & event labels
-if bosUp
+// Structure & event labels (each fires at most once per level now)
+if showStruct and bosUp
     label.new(bar_index, low, "BOS", style=label.style_label_up, color=color.new(colBull,20), textcolor=color.white, size=size.tiny)
-if bosDn
+if showStruct and bosDn
     label.new(bar_index, high, "BOS", style=label.style_label_down, color=color.new(colBear,20), textcolor=color.white, size=size.tiny)
-if chochUp
+if showStruct and chochUp
     label.new(bar_index, low, "CHoCH", style=label.style_label_up, color=color.new(color.teal,10), textcolor=color.white, size=size.tiny)
-if chochDn
+if showStruct and chochDn
     label.new(bar_index, high, "CHoCH", style=label.style_label_down, color=color.new(color.maroon,10), textcolor=color.white, size=size.tiny)
-if sweepBull
+if showSweeps and sweepBull
     label.new(bar_index, low, "Sweep", style=label.style_xcross, color=colBull, textcolor=color.white, size=size.tiny)
-if sweepBear
+if showSweeps and sweepBear
     label.new(bar_index, high, "Sweep", style=label.style_xcross, color=colBear, textcolor=color.white, size=size.tiny)
 
 // Fair value gap boxes (only the active ones)
@@ -590,7 +631,7 @@ f_row(_t, _r, _label, _val, _col) =>
     table.cell(_t, 1, _r, _val,   text_color=_col,        text_size=size.small, bgcolor=color.new(color.black,60), text_halign=text.align_right)
 
 if showDash and barstate.islast
-    trendTxt = mtfBull ? "BULLISH" : mtfBear ? "BEARISH" : "MIXED"
+    trendTxt = (mtfBull ? "BULLISH " : mtfBear ? "BEARISH " : "MIXED ") + str.tostring(math.max(mtfBullCnt, mtfBearCnt)) + "/3"
     trendCol = mtfBull ? colBull : mtfBear ? colBear : color.gray
     msTxt    = msBull ? "Bullish (" + lastSwingType + ")" : msBear ? "Bearish (" + lastSwingType + ")" : "Neutral"
     sigState = buySignal ? "BUY" : sellSignal ? "SELL" : posDir==1 ? "Long open" : posDir==-1 ? "Short open" : "Flat"
@@ -603,7 +644,7 @@ if showDash and barstate.islast
     table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue,40))
     f_row(dash, 1,  "Trend (MTF)",      trendTxt, trendCol)
     f_row(dash, 2,  "Structure",        msTxt, msBull ? colBull : msBear ? colBear : color.gray)
-    f_row(dash, 3,  "Confidence",       str.tostring(confNow) + "%", confCol)
+    f_row(dash, 3,  "Confidence",       str.tostring(math.round(confNow)) + "%", confCol)
     f_row(dash, 4,  "Volume",           volInstit ? "INSTITUTIONAL" : volOk ? "Above avg" : "Low", volInstit ? color.orange : volOk ? colBull : color.gray)
     f_row(dash, 5,  "ATR vs avg",       atrOk ? "Expanding" : "Low", atrOk ? colBull : color.gray)
     f_row(dash, 6,  "ADX",              str.tostring(math.round(adx,1)), adxOk ? colBull : color.gray)
