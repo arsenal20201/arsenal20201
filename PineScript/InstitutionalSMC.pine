@@ -45,6 +45,15 @@ showZones   = input.bool(true, "Show S/D zones, OB & FVG", group=grpGen)
 showSR      = input.bool(true, "Show dynamic Support / Resistance", group=grpGen)
 showBg      = input.bool(true, "Trend background", group=grpGen)
 
+// ---- Signal sensitivity ----------------------------------------------------
+//  The engine no longer requires ALL secondary filters at once (that made the
+//  non-dominant side — usually buys in a downtrend — effectively impossible).
+//  Instead it needs the CORE direction (trend + HA momentum [+ structure]) plus
+//  at least `minExtras` of 7 secondary filters. Symmetric for buys and sells.
+grpSig    = "═══ Signal Sensitivity ═══"
+reqStruct = input.bool(true,  "Require matching market structure", group=grpSig, tooltip="ON: a buy needs bullish structure (msBull), a sell needs bearish (msBear). Turn OFF to allow momentum signals against the current structure (more, earlier, counter-trend signals).")
+minExtras = input.int(2, "Min secondary filters (of 7)", minval=0, maxval=7, group=grpSig, tooltip="How many of {RSI, VWAP, pullback, ADX, ATR, volume, clear of S/R} must agree. Lower = more signals on both sides. The confidence score still gates quality.")
+
 // ---- Multi-timeframe trend engine -----------------------------------------
 grpMTF  = "═══ Multi-Timeframe Trend ═══"
 useMTF  = input.bool(true, "Require higher-timeframe agreement", group=grpMTF)
@@ -500,12 +509,21 @@ sellScore = f_score(sellTrendPts, haSellOk, msBear, sweepBear or equalHighs, inB
 // ============================================================================
 //  SECTION 12 — ENTRY LOGIC  (all required factors agree AND score >= thresh)
 // ============================================================================
-//  Hard gates that must always be true in addition to the score. ATR is only a
-//  hard gate when `atrGate` is enabled; otherwise low volatility just costs
-//  score points (so early-reversal moves are not silently blocked).
+//  CORE direction (mandatory, symmetric): not-opposed HTF trend + HA momentum
+//  [+ matching structure unless reqStruct is off].
 atrGateOk = not atrGate or atrOk
-buyGate  = buyTrendOk  and haBuyOk  and msBull and rsiBuyOk  and vwapBuyOk  and sessionOk and pullbackBuyOk  and adxOk and atrGateOk and not nearRes
-sellGate = sellTrendOk and haSellOk and msBear and rsiSellOk and vwapSellOk and sessionOk and pullbackSellOk and adxOk and atrGateOk and not nearSup
+buyStructOk  = msBull or not reqStruct
+sellStructOk = msBear or not reqStruct
+buyCore  = buyTrendOk  and haBuyOk  and buyStructOk  and sessionOk and atrGateOk
+sellCore = sellTrendOk and haSellOk and sellStructOk and sessionOk and atrGateOk
+
+//  SECONDARY filters: count how many agree; require >= minExtras (not all).
+//  This is what lets the non-dominant side fire instead of needing all 10.
+buyExtras  = (rsiBuyOk ?1:0) + (vwapBuyOk ?1:0) + (pullbackBuyOk ?1:0) + (adxOk?1:0) + (atrOk?1:0) + (volOk?1:0) + (not nearRes?1:0)
+sellExtras = (rsiSellOk?1:0) + (vwapSellOk?1:0) + (pullbackSellOk?1:0) + (adxOk?1:0) + (atrOk?1:0) + (volOk?1:0) + (not nearSup?1:0)
+
+buyGate  = buyCore  and buyExtras  >= minExtras
+sellGate = sellCore and sellExtras >= minExtras
 
 rawBuy  = buyGate  and buyScore  >= scoreThresh and rrBuyOk
 rawSell = sellGate and sellScore >= scoreThresh and rrSellOk
@@ -532,11 +550,11 @@ strongSell = sellSignal and haStrongBear and volInstit and sellScore >= 90
 //  Returns the FIRST failing condition so you can see exactly why a buy/sell
 //  is not printing — no more guessing whether the indicator is "broken".
 // ----------------------------------------------------------------------------
-f_block(_trendOk, _haOk, _ms, _rsiOk, _vwapOk, _pbOk, _nearOpp, _score) =>
-    not _trendOk ? "HTF trend" : not _haOk ? "HA candles" : not _ms ? "Structure" : not _rsiOk ? "RSI" : not _vwapOk ? "VWAP" : not sessionOk ? "Session" : not _pbOk ? "Pullback" : not adxOk ? "ADX" : not atrGateOk ? "ATR" : _nearOpp ? "Near S/R" : _score < scoreThresh ? "low score" : "READY"
+f_block(_trendOk, _haOk, _structOk, _extras, _score) =>
+    not _trendOk ? "HTF trend" : not _haOk ? "HA momentum" : not _structOk ? "Structure" : not sessionOk ? "Session" : _extras < minExtras ? "Filters " + str.tostring(_extras) + "/" + str.tostring(minExtras) : _score < scoreThresh ? "low score" : "READY"
 
-buyBlock  = f_block(buyTrendOk,  haBuyOk,  msBull, rsiBuyOk,  vwapBuyOk,  pullbackBuyOk,  nearRes, buyScore)
-sellBlock = f_block(sellTrendOk, haSellOk, msBear, rsiSellOk, vwapSellOk, pullbackSellOk, nearSup, sellScore)
+buyBlock  = f_block(buyTrendOk,  haBuyOk,  buyStructOk,  buyExtras,  buyScore)
+sellBlock = f_block(sellTrendOk, haSellOk, sellStructOk, sellExtras, sellScore)
 
 // ============================================================================
 //  SECTION 13 — EXIT LOGIC + ATR TRAILING STOP
