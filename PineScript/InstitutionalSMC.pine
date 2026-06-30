@@ -51,6 +51,8 @@ showBg      = input.bool(true, "Trend background", group=grpGen)
 //  Instead it needs the CORE direction (trend + HA momentum [+ structure]) plus
 //  at least `minExtras` of 7 secondary filters. Symmetric for buys and sells.
 grpSig    = "═══ Signal Sensitivity ═══"
+strongOnly  = input.bool(true, "Only strongest signals (quality)", group=grpSig, tooltip="ON (default): print a BUY/SELL only for institutional-grade setups — big-body momentum Heikin-Ashi candle + above-average volume + HTF trend CONFIRMED in the signal's direction + score >= the strong threshold. This filters out weak counter-trend CHoCH pokes. OFF: looser core + N-of-7 signals.")
+strongThresh= input.int(85, "Strong signal score", minval=50, maxval=100, group=grpSig, tooltip="Minimum confidence for a 'strong only' signal (used when 'Only strongest signals' is ON).")
 reqStruct = input.bool(true,  "Require matching market structure", group=grpSig, tooltip="ON: a buy needs bullish structure (msBull), a sell needs bearish (msBear). Turn OFF to allow momentum signals against the current structure (more, earlier, counter-trend signals).")
 minExtras = input.int(2, "Min secondary filters (of 7)", minval=0, maxval=7, group=grpSig, tooltip="How many of {RSI, VWAP, pullback, ADX, ATR, volume, clear of S/R} must agree. Lower = more signals on both sides. The confidence score still gates quality.")
 
@@ -525,8 +527,15 @@ sellExtras = (rsiSellOk?1:0) + (vwapSellOk?1:0) + (pullbackSellOk?1:0) + (adxOk?
 buyGate  = buyCore  and buyExtras  >= minExtras
 sellGate = sellCore and sellExtras >= minExtras
 
-rawBuy  = buyGate  and buyScore  >= scoreThresh and rrBuyOk
-rawSell = sellGate and sellScore >= scoreThresh and rrSellOk
+//  Quality tier: when 'strongOnly' is on, a signal additionally needs a
+//  big-body momentum candle, above-average volume, a CONFIRMED HTF trend in its
+//  direction, and the higher 'strong' score. Symmetric — filters weak,
+//  counter-trend reversals on both sides.
+strongBuyOk  = not strongOnly or (haStrongBull and volOk and mtfBull and buyScore  >= strongThresh)
+strongSellOk = not strongOnly or (haStrongBear and volOk and mtfBear and sellScore >= strongThresh)
+
+rawBuy  = buyGate  and buyScore  >= scoreThresh and rrBuyOk  and strongBuyOk
+rawSell = sellGate and sellScore >= scoreThresh and rrSellOk and strongSellOk
 
 // One-signal-per-swing debounce so we don't spam every bar.
 var int lastSignalDir = 0
@@ -622,10 +631,13 @@ if showStruct and chochUp
     label.new(bar_index, low, "CHoCH", style=label.style_label_up, color=color.new(color.teal,10), textcolor=color.white, size=size.tiny)
 if showStruct and chochDn
     label.new(bar_index, high, "CHoCH", style=label.style_label_down, color=color.new(color.maroon,10), textcolor=color.white, size=size.tiny)
+// Liquidity-sweep tags. (These were the cryptic "X" marks — now clean labels
+// with BLACK text. Toggle them with "Show liquidity-sweep labels" in the
+// Market Structure input group.)
 if showSweeps and sweepBull
-    label.new(bar_index, low, "Sweep", style=label.style_xcross, color=colBull, textcolor=color.white, size=size.tiny)
+    label.new(bar_index, low, "Sweep", style=label.style_label_up, color=color.new(colBull,20), textcolor=color.black, size=size.tiny)
 if showSweeps and sweepBear
-    label.new(bar_index, high, "Sweep", style=label.style_xcross, color=colBear, textcolor=color.white, size=size.tiny)
+    label.new(bar_index, high, "Sweep", style=label.style_label_down, color=color.new(colBear,20), textcolor=color.black, size=size.tiny)
 
 // Fair value gap boxes (only the active ones)
 var box bullFvgBox = na
@@ -716,7 +728,7 @@ if showDash and barstate.islast
     f_row(dash, 12, "Risk:Reward",      "1:" + str.tostring(math.round(rrNow,2)), rrNow >= minRR ? colBull : color.gray)
     f_row(dash, 13, "Signal strength",  confNow >= 90 ? "STRONG" : confNow >= scoreThresh ? "Valid" : "—", confNow >= 90 ? color.orange : confNow >= scoreThresh ? colBull : color.gray)
     f_row(dash, 14, "State",            sigState, sigCol)
-    f_row(dash, 15, "Mode / HTFs",      (trendStrict ? "Strict " : "Lenient ") + htfA + "/" + htfB + "/" + htfC, color.silver)
+    f_row(dash, 15, "Mode / HTFs",      (strongOnly ? "STRONG·" : "") + (trendStrict ? "Strict " : "Lenient ") + htfA + "/" + htfB + "/" + htfC, color.silver)
 
 // ============================================================================
 //  SECTION 16 — ALERTS
