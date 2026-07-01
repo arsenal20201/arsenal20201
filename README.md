@@ -135,5 +135,8 @@ Key knobs to tune for win rate vs. profitability:
 MQL5/
   Experts/
     HighWinRateEA.mq5   # the Expert Advisor
+PineScript/
+  Institutional-SMC-Confluence-Engine-v2.pine  # TradingView Pine Script v6 SMC indicator
+  CODE_REVIEW.md         # institutional code review (v1 weaknesses/scores + v2 design map)
 README.md               # this file
 ```
