@@ -4,6 +4,11 @@ name: Fetch XAUUSD historical data
 # GitHub-hosted runner (which has open internet, unlike the Claude sandbox)
 # and commits the gzipped CSV into the branch so the backtester can use it.
 on:
+  push:
+    branches:
+      - claude/smc-ict-scalping-indicator-bfz82h
+    paths:
+      - '.github/workflows/fetch-data.yml'
   workflow_dispatch:
     inputs:
       date_from:
