@@ -9,6 +9,7 @@ on:
       - claude/smc-ict-scalping-indicator-bfz82h
     paths:
       - '.github/workflows/fetch-data.yml'
+      - 'backtester/fetch_data.py'
   workflow_dispatch:
     inputs:
       date_from:
@@ -29,25 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: '20'
+          python-version: '3.11'
 
-      - name: Download XAUUSD M1 candles from Dukascopy
+      - name: Download XAUUSD M1 candles (Dukascopy, HistData fallback)
         run: |
-          npx -y dukascopy-node \
-            --instrument xauusd \
-            --date-from "${{ github.event.inputs.date_from || '2025-06-01' }}" \
-            --date-to "${{ github.event.inputs.date_to || '2026-07-05' }}" \
-            --timeframe m1 \
-            --format csv \
-            --directory dl-tmp \
-            --file-name XAUUSD_M1 \
-            --volumes \
-            --retries 5 \
-            --batch-size 20 \
-            --batch-pause 1000
-          ls -la dl-tmp
+          python3 backtester/fetch_data.py \
+            --from "${{ github.event.inputs.date_from || '2025-06-01' }}" \
+            --to "${{ github.event.inputs.date_to || '2026-07-05' }}" \
+            --out dl-tmp/XAUUSD_M1.csv
           head -3 dl-tmp/XAUUSD_M1.csv
           tail -3 dl-tmp/XAUUSD_M1.csv
           wc -l dl-tmp/XAUUSD_M1.csv
