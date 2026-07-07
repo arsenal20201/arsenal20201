@@ -63,6 +63,11 @@ class Params:
     session: str = "all"        # "all" | "HH-HH" UTC entry window, e.g. "07-17"
     allow_longs: bool = True
     allow_shorts: bool = True
+    break_mode: str = "all"     # "all" | "choch" (reversals only) | "bos"
+    breakeven: bool = False     # move stop to entry once +1R is reached
+    zone_min_atr: float = 0.0   # reject zones thinner than this (× ATR)
+    zone_max_atr: float = 10.0  # reject zones taller than this (× ATR)
+    min_risk_spread_mult: float = 0.0  # require risk >= this × spread
     # execution costs (price units, i.e. USD per oz for XAUUSD)
     spread: float = 0.30        # full bid/ask spread
     slippage: float = 0.05      # extra cost on entry and stop exits
@@ -79,15 +84,12 @@ class Trade:
     direction: int              # +1 long, -1 short
     entry_time: pd.Timestamp
     entry: float
-    stop: float
+    stop: float                 # current stop (may move to breakeven)
     target: float
+    init_risk: float            # risk at entry — R denominator stays fixed
     exit_time: pd.Timestamp | None = None
     exit: float | None = None
-    reason: str = ""            # "tp" | "stop" | "week_end" | "eod"
-
-    @property
-    def risk(self) -> float:
-        return abs(self.entry - self.stop)
+    reason: str = ""            # "tp" | "stop" | "be" | "week_end" | "eod"
 
     @property
     def pnl(self) -> float:
@@ -95,7 +97,7 @@ class Trade:
 
     @property
     def r_multiple(self) -> float:
-        return self.pnl / self.risk if self.risk > 0 else 0.0
+        return self.pnl / self.init_risk if self.init_risk > 0 else 0.0
 
 
 # ----------------------------------------------------------------------------
@@ -118,10 +120,11 @@ def load_m1(path: str = DATA_FILE) -> pd.DataFrame:
     df.columns = ["timestamp", "open", "high", "low", "close", "volume"][: len(df.columns)]
     # dukascopy-node timestamps are epoch milliseconds (UTC);
     # MT5 exports use 'YYYY.MM.DD HH:MM' strings — support both.
-    if np.issubdtype(df["timestamp"].dtype, np.number):
+    if pd.api.types.is_numeric_dtype(df["timestamp"]):
         idx = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     else:
-        idx = pd.to_datetime(df["timestamp"].str.replace(".", "-", regex=False), utc=True)
+        idx = pd.to_datetime(
+            df["timestamp"].astype(str).str.replace(".", "-", regex=False), utc=True)
     df.index = idx.dt.tz_convert("UTC").dt.tz_localize(None)
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     df = df[~df.index.duplicated(keep="first")].sort_index()
@@ -283,21 +286,27 @@ def run_backtest(df: pd.DataFrame, p: Params, collect_trades: bool = True):
                     tp_hit = h[t] >= pos.target
                     if stop_hit:  # conservative: stop first
                         px = min(pos.stop, o[t]) - p.slippage
-                        pos.exit, pos.exit_time, pos.reason = px, ts[t], "stop"
+                        reason = "be" if pos.stop >= pos.entry else "stop"
+                        pos.exit, pos.exit_time, pos.reason = px, ts[t], reason
                         exited = True
                     elif tp_hit:
                         pos.exit, pos.exit_time, pos.reason = pos.target, ts[t], "tp"
                         exited = True
+                    elif p.breakeven and h[t] >= pos.entry + pos.init_risk:
+                        pos.stop = max(pos.stop, pos.entry)
                 else:
                     stop_hit = h[t] >= pos.stop
                     tp_hit = l[t] <= pos.target
                     if stop_hit:
                         px = max(pos.stop, o[t]) + p.slippage
-                        pos.exit, pos.exit_time, pos.reason = px, ts[t], "stop"
+                        reason = "be" if pos.stop <= pos.entry else "stop"
+                        pos.exit, pos.exit_time, pos.reason = px, ts[t], reason
                         exited = True
                     elif tp_hit:
                         pos.exit, pos.exit_time, pos.reason = pos.target, ts[t], "tp"
                         exited = True
+                    elif p.breakeven and l[t] <= pos.entry - pos.init_risk:
+                        pos.stop = min(pos.stop, pos.entry)
             if exited:
                 trades.append(pos)
                 pos = None
@@ -309,14 +318,14 @@ def run_backtest(df: pd.DataFrame, p: Params, collect_trades: bool = True):
                 fill = o[t] + half_spread + p.slippage
                 stop = z_btm - atr_sig * p.stop_atr_mult
                 risk = fill - stop
-                if risk > 0:
-                    pos = Trade(1, ts[t], fill, stop, fill + risk * p.rr_mult)
+                if risk > 0 and risk >= p.min_risk_spread_mult * p.spread:
+                    pos = Trade(1, ts[t], fill, stop, fill + risk * p.rr_mult, risk)
             else:
                 fill = o[t] - half_spread - p.slippage
                 stop = z_top + atr_sig * p.stop_atr_mult
                 risk = stop - fill
-                if risk > 0:
-                    pos = Trade(-1, ts[t], fill, stop, fill - risk * p.rr_mult)
+                if risk > 0 and risk >= p.min_risk_spread_mult * p.spread:
+                    pos = Trade(-1, ts[t], fill, stop, fill - risk * p.rr_mult, risk)
             pending = None
 
         if t < warmup:
@@ -344,19 +353,29 @@ def run_backtest(df: pd.DataFrame, p: Params, collect_trades: bool = True):
         prev_itop_y, prev_ibtm_y = itop_y, ibtm_y
 
         if bull_break:
+            choch = itrend < 0
             itop_crossed = True
             itrend = 1
-            for i in range(1, min(p.ob_lookback, t) + 1):
-                if c[t - i] < o[t - i]:
-                    setup_dir, zone_top, zone_btm, zone_birth = 1, h[t - i], l[t - i], t
-                    break
+            mode_ok = (p.break_mode == "all" or (p.break_mode == "choch") == choch)
+            if mode_ok:
+                for i in range(1, min(p.ob_lookback, t) + 1):
+                    if c[t - i] < o[t - i]:
+                        zh = h[t - i] - l[t - i]
+                        if p.zone_min_atr * atr_arr[t] <= zh <= p.zone_max_atr * atr_arr[t]:
+                            setup_dir, zone_top, zone_btm, zone_birth = 1, h[t - i], l[t - i], t
+                        break
         if bear_break:
+            choch = itrend > 0
             ibtm_crossed = True
             itrend = -1
-            for i in range(1, min(p.ob_lookback, t) + 1):
-                if c[t - i] > o[t - i]:
-                    setup_dir, zone_top, zone_btm, zone_birth = -1, h[t - i], l[t - i], t
-                    break
+            mode_ok = (p.break_mode == "all" or (p.break_mode == "choch") == choch)
+            if mode_ok:
+                for i in range(1, min(p.ob_lookback, t) + 1):
+                    if c[t - i] > o[t - i]:
+                        zh = h[t - i] - l[t - i]
+                        if p.zone_min_atr * atr_arr[t] <= zh <= p.zone_max_atr * atr_arr[t]:
+                            setup_dir, zone_top, zone_btm, zone_birth = -1, h[t - i], l[t - i], t
+                        break
 
         # ------------------------------------------------ zone invalidation
         if setup_dir == 1 and (t - zone_birth > p.zone_timeout or c[t] < zone_btm):
@@ -446,13 +465,15 @@ def monthly_table(trades: list[Trade]) -> pd.DataFrame:
 # Optimizer
 # ----------------------------------------------------------------------------
 
+# Stage-1 grid: 216 combos. Refine winners by hand afterwards (breakeven,
+# zone filters, zone_timeout) — a bigger grid here would only curve-fit.
 GRID = {
     "swing_len": [4, 5, 8],
     "rr_mult": [1.0, 1.5, 2.0],
-    "stop_atr_mult": [0.3, 0.5, 0.8],
+    "stop_atr_mult": [0.3, 0.5],
     "ema_len": [0, 200],
     "session": ["all", "07-17", "12-17"],
-    "zone_timeout": [30, 60],
+    "break_mode": ["all", "choch"],
 }
 
 
