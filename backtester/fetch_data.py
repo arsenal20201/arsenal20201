@@ -40,7 +40,7 @@ DUKA_URL = ("https://datafeed.dukascopy.com/datafeed/XAUUSD/"
 REC = struct.Struct(">IIIIIf")  # secs offset, then 4 int prices, float volume
 
 
-def http_get(url: str, retries: int = 4, timeout: int = 30) -> bytes | None:
+def http_get(url: str, retries: int = 3, timeout: int = 12) -> bytes | None:
     last = None
     for attempt in range(retries):
         try:
@@ -53,7 +53,7 @@ def http_get(url: str, retries: int = 4, timeout: int = 30) -> bytes | None:
             last = e
         except Exception as e:  # noqa: BLE001 - network errors of all kinds
             last = e
-        time.sleep(1.5 * (attempt + 1))
+        time.sleep(1.0 * (attempt + 1))
     print(f"  giving up on {url}: {last}", file=sys.stderr)
     return None
 
@@ -109,23 +109,36 @@ def parse_bi5(blob: bytes, day: dt.date, scale_holder: dict) -> list[tuple]:
     return rows
 
 
-def fetch_dukascopy(d_from: dt.date, d_to: dt.date) -> list[tuple]:
+def fetch_dukascopy(d_from: dt.date, d_to: dt.date,
+                    workers: int = 8, budget_secs: int = 18 * 60) -> list[tuple]:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    days = [d_from + dt.timedelta(days=i) for i in range((d_to - d_from).days + 1)]
     rows: list[tuple] = []
     holder: dict = {}
-    day = d_from
     got_days = miss_days = 0
-    while day <= d_to:
-        blob = http_get(DUKA_URL.format(y=day.year, m0=day.month - 1, d=day.day))
-        if blob:
-            day_rows = parse_bi5(blob, day, holder)
-            rows.extend(day_rows)
-            got_days += 1
-        else:
-            miss_days += 1
-        if (got_days + miss_days) % 30 == 0:
-            print(f"  {day}: days ok={got_days} empty={miss_days} rows={len(rows)}")
-        day += dt.timedelta(days=1)
-        time.sleep(0.12)
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(
+            http_get, DUKA_URL.format(y=d.year, m0=d.month - 1, d=d.day)): d
+            for d in days}
+        for fut in as_completed(futs):
+            day = futs[fut]
+            blob = fut.result()
+            if blob:
+                rows.extend(parse_bi5(blob, day, holder))
+                got_days += 1
+            else:
+                miss_days += 1
+            done = got_days + miss_days
+            if done % 50 == 0:
+                print(f"  {done}/{len(days)} days, ok={got_days} rows={len(rows)}"
+                      f" elapsed={time.monotonic()-started:.0f}s", flush=True)
+            if time.monotonic() - started > budget_secs:
+                print("  time budget exceeded — stopping Dukascopy fetch", flush=True)
+                for f in futs:
+                    f.cancel()
+                break
     print(f"Dukascopy: {got_days} days with data, {miss_days} empty, {len(rows)} rows")
     return rows
 
