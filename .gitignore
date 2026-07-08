@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 dl-tmp/
 hist-tmp/
+backtester/optimize_log.txt
