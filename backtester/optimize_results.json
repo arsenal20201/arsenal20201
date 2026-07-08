@@ -1,0 +1,704 @@
+{
+  "3min": [
+    {
+      "params": {
+        "swing_len": 8,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 97,
+        "win_rate": 41.24,
+        "profit_factor": 1.332,
+        "avg_r": 0.1991,
+        "total_r": 19.31,
+        "max_dd_r": 9.12,
+        "max_consec_losses": 9
+      },
+      "score": 1.7785,
+      "valid": {
+        "trades": 22,
+        "win_rate": 45.45,
+        "profit_factor": 1.558,
+        "avg_r": 0.3059,
+        "total_r": 6.73,
+        "max_dd_r": 4.02,
+        "max_consec_losses": 4
+      }
+    },
+    {
+      "params": {
+        "swing_len": 8,
+        "rr_mult": 1.5,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 97,
+        "win_rate": 48.45,
+        "profit_factor": 1.353,
+        "avg_r": 0.1863,
+        "total_r": 18.07,
+        "max_dd_r": 7.99,
+        "max_consec_losses": 5
+      },
+      "score": 1.675,
+      "valid": {
+        "trades": 22,
+        "win_rate": 54.55,
+        "profit_factor": 1.79,
+        "avg_r": 0.3611,
+        "total_r": 7.94,
+        "max_dd_r": 4.02,
+        "max_consec_losses": 4
+      }
+    },
+    {
+      "params": {
+        "swing_len": 4,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "all",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 558,
+        "win_rate": 36.38,
+        "profit_factor": 1.109,
+        "avg_r": 0.0703,
+        "total_r": 39.23,
+        "max_dd_r": 30.43,
+        "max_consec_losses": 15
+      },
+      "score": 1.052,
+      "valid": {
+        "trades": 150,
+        "win_rate": 34.0,
+        "profit_factor": 1.011,
+        "avg_r": 0.0071,
+        "total_r": 1.07,
+        "max_dd_r": 14.7,
+        "max_consec_losses": 8
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "all",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 499,
+        "win_rate": 35.87,
+        "profit_factor": 1.088,
+        "avg_r": 0.0576,
+        "total_r": 28.75,
+        "max_dd_r": 23.39,
+        "max_consec_losses": 18
+      },
+      "score": 0.8189,
+      "valid": {
+        "trades": 131,
+        "win_rate": 37.4,
+        "profit_factor": 1.154,
+        "avg_r": 0.0974,
+        "total_r": 12.76,
+        "max_dd_r": 9.39,
+        "max_consec_losses": 7
+      }
+    },
+    {
+      "params": {
+        "swing_len": 8,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "all",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 383,
+        "win_rate": 36.03,
+        "profit_factor": 1.094,
+        "avg_r": 0.0612,
+        "total_r": 23.44,
+        "max_dd_r": 19.64,
+        "max_consec_losses": 11
+      },
+      "score": 0.8049,
+      "valid": {
+        "trades": 100,
+        "win_rate": 34.0,
+        "profit_factor": 1.001,
+        "avg_r": 0.0007,
+        "total_r": 0.07,
+        "max_dd_r": 13.36,
+        "max_consec_losses": 8
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 126,
+        "win_rate": 37.3,
+        "profit_factor": 1.126,
+        "avg_r": 0.0802,
+        "total_r": 10.1,
+        "max_dd_r": 10.14,
+        "max_consec_losses": 8
+      },
+      "score": 0.6974,
+      "valid": {
+        "trades": 27,
+        "win_rate": 40.74,
+        "profit_factor": 1.292,
+        "avg_r": 0.1743,
+        "total_r": 4.7,
+        "max_dd_r": 7.05,
+        "max_consec_losses": 5
+      }
+    },
+    {
+      "params": {
+        "swing_len": 8,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "07-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 169,
+        "win_rate": 36.69,
+        "profit_factor": 1.117,
+        "avg_r": 0.0754,
+        "total_r": 12.73,
+        "max_dd_r": 16.22,
+        "max_consec_losses": 13
+      },
+      "score": 0.6558,
+      "valid": {
+        "trades": 51,
+        "win_rate": 31.37,
+        "profit_factor": 0.871,
+        "avg_r": -0.0894,
+        "total_r": -4.56,
+        "max_dd_r": 14.52,
+        "max_consec_losses": 9
+      }
+    },
+    {
+      "params": {
+        "swing_len": 8,
+        "rr_mult": 1.5,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "07-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 169,
+        "win_rate": 43.2,
+        "profit_factor": 1.108,
+        "avg_r": 0.0623,
+        "total_r": 10.54,
+        "max_dd_r": 13.66,
+        "max_consec_losses": 10
+      },
+      "score": 0.5367,
+      "valid": {
+        "trades": 51,
+        "win_rate": 41.18,
+        "profit_factor": 1.039,
+        "avg_r": 0.023,
+        "total_r": 1.17,
+        "max_dd_r": 9.81,
+        "max_consec_losses": 7
+      }
+    }
+  ],
+  "5min": [
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 1.5,
+        "stop_atr_mult": 0.3,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 82,
+        "win_rate": 46.34,
+        "profit_factor": 1.217,
+        "avg_r": 0.1215,
+        "total_r": 9.96,
+        "max_dd_r": 9.37,
+        "max_consec_losses": 7
+      },
+      "score": 0.9128,
+      "valid": {
+        "trades": 25,
+        "win_rate": 16.0,
+        "profit_factor": 0.292,
+        "avg_r": -0.5824,
+        "total_r": -14.56,
+        "max_dd_r": 15.06,
+        "max_consec_losses": 8
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 82,
+        "win_rate": 37.8,
+        "profit_factor": 1.136,
+        "avg_r": 0.0865,
+        "total_r": 7.1,
+        "max_dd_r": 10.45,
+        "max_consec_losses": 7
+      },
+      "score": 0.5743,
+      "valid": {
+        "trades": 25,
+        "win_rate": 12.0,
+        "profit_factor": 0.283,
+        "avg_r": -0.6089,
+        "total_r": -15.22,
+        "max_dd_r": 16.22,
+        "max_consec_losses": 9
+      }
+    },
+    {
+      "params": {
+        "swing_len": 8,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 0,
+        "session": "all",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 676,
+        "win_rate": 35.36,
+        "profit_factor": 1.072,
+        "avg_r": 0.0471,
+        "total_r": 31.83,
+        "max_dd_r": 32.85,
+        "max_consec_losses": 19
+      },
+      "score": 0.5676,
+      "valid": {
+        "trades": 187,
+        "win_rate": 31.55,
+        "profit_factor": 0.878,
+        "avg_r": -0.0842,
+        "total_r": -15.75,
+        "max_dd_r": 26.0,
+        "max_consec_losses": 12
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 1.0,
+        "stop_atr_mult": 0.3,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 83,
+        "win_rate": 55.42,
+        "profit_factor": 1.167,
+        "avg_r": 0.0783,
+        "total_r": 6.5,
+        "max_dd_r": 10.43,
+        "max_consec_losses": 7
+      },
+      "score": 0.5047,
+      "valid": {
+        "trades": 25,
+        "win_rate": 40.0,
+        "profit_factor": 0.661,
+        "avg_r": -0.205,
+        "total_r": -5.13,
+        "max_dd_r": 7.1,
+        "max_consec_losses": 6
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 1.5,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 82,
+        "win_rate": 43.9,
+        "profit_factor": 1.117,
+        "avg_r": 0.0674,
+        "total_r": 5.53,
+        "max_dd_r": 8.91,
+        "max_consec_losses": 7
+      },
+      "score": 0.4321,
+      "valid": {
+        "trades": 25,
+        "win_rate": 16.0,
+        "profit_factor": 0.297,
+        "avg_r": -0.5685,
+        "total_r": -14.21,
+        "max_dd_r": 14.71,
+        "max_consec_losses": 8
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.3,
+        "ema_len": 0,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 164,
+        "win_rate": 35.98,
+        "profit_factor": 1.073,
+        "avg_r": 0.0478,
+        "total_r": 7.84,
+        "max_dd_r": 15.49,
+        "max_consec_losses": 13
+      },
+      "score": 0.3023,
+      "valid": {
+        "trades": 50,
+        "win_rate": 24.0,
+        "profit_factor": 0.637,
+        "avg_r": -0.273,
+        "total_r": -13.65,
+        "max_dd_r": 14.65,
+        "max_consec_losses": 9
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 1.0,
+        "stop_atr_mult": 0.3,
+        "ema_len": 200,
+        "session": "07-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 152,
+        "win_rate": 53.29,
+        "profit_factor": 1.092,
+        "avg_r": 0.0444,
+        "total_r": 6.74,
+        "max_dd_r": 15.67,
+        "max_consec_losses": 7
+      },
+      "score": 0.234,
+      "valid": {
+        "trades": 52,
+        "win_rate": 53.85,
+        "profit_factor": 1.158,
+        "avg_r": 0.0736,
+        "total_r": 3.83,
+        "max_dd_r": 7.12,
+        "max_consec_losses": 5
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.3,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 82,
+        "win_rate": 36.59,
+        "profit_factor": 1.067,
+        "avg_r": 0.0439,
+        "total_r": 3.6,
+        "max_dd_r": 11.75,
+        "max_consec_losses": 7
+      },
+      "score": 0.1625,
+      "valid": {
+        "trades": 25,
+        "win_rate": 12.0,
+        "profit_factor": 0.278,
+        "avg_r": -0.6228,
+        "total_r": -15.57,
+        "max_dd_r": 16.57,
+        "max_consec_losses": 9
+      }
+    }
+  ],
+  "15min": [
+    {
+      "params": {
+        "swing_len": 4,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 0,
+        "session": "12-17",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 125,
+        "win_rate": 48.0,
+        "profit_factor": 1.696,
+        "avg_r": 0.3592,
+        "total_r": 44.91,
+        "max_dd_r": 6.02,
+        "max_consec_losses": 6
+      },
+      "score": 3.8956,
+      "valid": {
+        "trades": 39,
+        "win_rate": 48.72,
+        "profit_factor": 1.655,
+        "avg_r": 0.3368,
+        "total_r": 13.13,
+        "max_dd_r": 6.01,
+        "max_consec_losses": 7
+      }
+    },
+    {
+      "params": {
+        "swing_len": 4,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.3,
+        "ema_len": 0,
+        "session": "12-17",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 131,
+        "win_rate": 48.09,
+        "profit_factor": 1.661,
+        "avg_r": 0.3523,
+        "total_r": 46.15,
+        "max_dd_r": 7.71,
+        "max_consec_losses": 6
+      },
+      "score": 3.8781,
+      "valid": {
+        "trades": 40,
+        "win_rate": 52.5,
+        "profit_factor": 1.958,
+        "avg_r": 0.4561,
+        "total_r": 18.24,
+        "max_dd_r": 6.01,
+        "max_consec_losses": 7
+      }
+    },
+    {
+      "params": {
+        "swing_len": 4,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 89,
+        "win_rate": 50.56,
+        "profit_factor": 1.832,
+        "avg_r": 0.4107,
+        "total_r": 36.56,
+        "max_dd_r": 8.03,
+        "max_consec_losses": 8
+      },
+      "score": 3.7139,
+      "valid": {
+        "trades": 25,
+        "win_rate": 48.0,
+        "profit_factor": 1.472,
+        "avg_r": 0.246,
+        "total_r": 6.15,
+        "max_dd_r": 5.01,
+        "max_consec_losses": 5
+      }
+    },
+    {
+      "params": {
+        "swing_len": 4,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.3,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 92,
+        "win_rate": 50.0,
+        "profit_factor": 1.757,
+        "avg_r": 0.3881,
+        "total_r": 35.71,
+        "max_dd_r": 8.03,
+        "max_consec_losses": 8
+      },
+      "score": 3.5619,
+      "valid": {
+        "trades": 26,
+        "win_rate": 53.85,
+        "profit_factor": 1.936,
+        "avg_r": 0.433,
+        "total_r": 11.26,
+        "max_dd_r": 3.01,
+        "max_consec_losses": 4
+      }
+    },
+    {
+      "params": {
+        "swing_len": 4,
+        "rr_mult": 1.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 96,
+        "win_rate": 69.79,
+        "profit_factor": 2.182,
+        "avg_r": 0.3665,
+        "total_r": 35.18,
+        "max_dd_r": 3.03,
+        "max_consec_losses": 3
+      },
+      "score": 3.5304,
+      "valid": {
+        "trades": 31,
+        "win_rate": 74.19,
+        "profit_factor": 2.757,
+        "avg_r": 0.4544,
+        "total_r": 14.09,
+        "max_dd_r": 2.01,
+        "max_consec_losses": 2
+      }
+    },
+    {
+      "params": {
+        "swing_len": 4,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.3,
+        "ema_len": 0,
+        "session": "12-17",
+        "break_mode": "choch"
+      },
+      "train": {
+        "trades": 82,
+        "win_rate": 48.78,
+        "profit_factor": 1.758,
+        "avg_r": 0.395,
+        "total_r": 32.39,
+        "max_dd_r": 5.03,
+        "max_consec_losses": 5
+      },
+      "score": 3.4763,
+      "valid": {
+        "trades": 23,
+        "win_rate": 65.22,
+        "profit_factor": 3.355,
+        "avg_r": 0.8217,
+        "total_r": 18.9,
+        "max_dd_r": 2.9,
+        "max_consec_losses": 3
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 1.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 87,
+        "win_rate": 70.11,
+        "profit_factor": 2.214,
+        "avg_r": 0.3719,
+        "total_r": 32.35,
+        "max_dd_r": 4.03,
+        "max_consec_losses": 3
+      },
+      "score": 3.3883,
+      "valid": {
+        "trades": 26,
+        "win_rate": 73.08,
+        "profit_factor": 2.58,
+        "avg_r": 0.4265,
+        "total_r": 11.09,
+        "max_dd_r": 2.01,
+        "max_consec_losses": 2
+      }
+    },
+    {
+      "params": {
+        "swing_len": 5,
+        "rr_mult": 2.0,
+        "stop_atr_mult": 0.5,
+        "ema_len": 200,
+        "session": "12-17",
+        "break_mode": "all"
+      },
+      "train": {
+        "trades": 80,
+        "win_rate": 50.0,
+        "profit_factor": 1.765,
+        "avg_r": 0.3816,
+        "total_r": 30.53,
+        "max_dd_r": 8.03,
+        "max_consec_losses": 8
+      },
+      "score": 3.2525,
+      "valid": {
+        "trades": 21,
+        "win_rate": 42.86,
+        "profit_factor": 1.339,
+        "avg_r": 0.1941,
+        "total_r": 4.08,
+        "max_dd_r": 5.01,
+        "max_consec_losses": 5
+      }
+    }
+  ]
+}

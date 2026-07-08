@@ -37,6 +37,18 @@
 //     profit factor < 1 loses money.
 //   * Walk-forward: tune on one date range, verify on a later one you did not
 //     tune on. If results collapse, the settings were curve-fit.
+//
+// TUNED DEFAULTS (offline backtest, XAUUSD, Jun 2025 – Jun 2026, 380k real
+// M1 candles, $0.30 spread + slippage modeled — see backtester/ in the repo):
+//   * XAUUSD 15m (PRIMARY):  defaults below as-is.
+//       Train Jul25–Mar26: 96 trades, 69.8% win, PF 2.18, max DD 3R.
+//       Validation Apr–Jun26 (out-of-sample): 74.2% win, PF 2.76, DD 2R.
+//       Full 13 months: 130 trades, 69.2% win, PF 2.13, +46R, DD 4R.
+//   * XAUUSD 3m (secondary): swing=8, TP=1.5R, Entry Mode=CHoCH only.
+//       Full 13 months: 120 trades, 49.2% win, PF 1.40, +25R, DD 8R.
+//   * XAUUSD 5m: FAILED out-of-sample validation — do not trade 5m.
+// Session window is UTC (12–17 = London PM + NY AM). One year of one regime
+// (gold bull run) — re-validate when market conditions change.
 // ---------------------------------------------------------------------------
 
 //@version=5
@@ -59,8 +71,10 @@ strategy("SMC Confluence Scalper [Backtest]"
 // ================================== //
 
 grpS = 'Structure'
-swingLen    = input.int(5,   'Internal Swing Length', minval = 2, maxval = 20, group = grpS,
-  tooltip = 'Bars each side used to confirm an internal swing high/low. 5 matches the SMC indicator internal structure.')
+swingLen    = input.int(4,   'Internal Swing Length', minval = 2, maxval = 20, group = grpS,
+  tooltip = 'Bars each side used to confirm an internal swing high/low. Backtest optimum: 4 on XAUUSD 15m, 8 on 3m.')
+breakMode   = input.string('All', 'Entry Mode', options = ['All', 'CHoCH only', 'BOS only'], group = grpS,
+  tooltip = 'CHoCH only = trade reversals (trend flip breaks). BOS only = trade continuations. Backtest: All on 15m, CHoCH only on 3m.')
 obLookback  = input.int(25,  'Order Block Search (bars)', minval = 3, maxval = 50, group = grpS,
   tooltip = 'How far back from the structure break to search for the last opposite candle that becomes the order block.')
 zoneTimeout = input.int(40,  'Zone Expiry (bars)', minval = 5, maxval = 200, group = grpS,
@@ -73,9 +87,9 @@ emaLen       = input.int(200, '', minval = 10, inline = 'ema', group = grpF,
 useRsiFilter = input.bool(false, 'RSI Filter', inline = 'rsi', group = grpF)
 rsiLen       = input.int(14, '', minval = 2, inline = 'rsi', group = grpF,
   tooltip = 'Longs need RSI > 50, shorts RSI < 50 at trigger time.')
-useSession   = input.bool(false, 'Session Filter', inline = 'ses', group = grpF)
-sessionSpec  = input.session('0700-1600', '', inline = 'ses', group = grpF,
-  tooltip = 'Only open trades inside this session (exchange timezone). Useful to avoid dead hours on FX/indices.')
+useSession   = input.bool(true, 'Session Filter (UTC)', inline = 'ses', group = grpF)
+sessionSpec  = input.session('1200-1700', '', inline = 'ses', group = grpF,
+  tooltip = 'Only open trades inside this UTC window. 1200-1700 UTC = London afternoon + New York morning, the validated window for XAUUSD.')
 
 grpR = 'Risk'
 allowLongs  = input.bool(true,  'Longs',  inline = 'dir', group = grpR)
@@ -83,9 +97,11 @@ allowShorts = input.bool(true,  'Shorts', inline = 'dir', group = grpR)
 atrLen      = input.int(14,   'ATR Length', minval = 1, group = grpR)
 stopAtrMult = input.float(0.5, 'Stop Buffer (× ATR)', minval = 0, step = 0.1, group = grpR,
   tooltip = 'Stop is placed this many ATRs beyond the zone edge.')
-rrMult      = input.float(1.5, 'Take Profit (R multiple)', minval = 0.5, step = 0.25, group = grpR,
-  tooltip = 'Target = risk distance × this multiple. Higher R lowers win rate but can raise expectancy.')
+rrMult      = input.float(1.0, 'Take Profit (R multiple)', minval = 0.5, step = 0.25, group = grpR,
+  tooltip = 'Target = risk distance × this multiple. Backtest optimum: 1.0 on XAUUSD 15m (69% win rate), 1.5 on 3m.')
 useBreakeven = input.bool(false, 'Move Stop to Breakeven at 1R', group = grpR)
+minRiskPts  = input.float(0.9, 'Min Stop Distance (price units)', minval = 0, step = 0.1, group = grpR,
+  tooltip = 'Reject entries whose stop distance is smaller than this — the spread eats such trades. For XAUUSD use ~3× your spread (0.9 for a $0.30 spread).')
 
 grpV = 'Visuals'
 showZones = input.bool(true, 'Show Order Block Zones', group = grpV)
@@ -100,7 +116,7 @@ atr = ta.atr(atrLen)
 ema = ta.ema(close, emaLen)
 rsi = ta.rsi(close, rsiLen)
 
-inSession = not useSession or not na(time(timeframe.period, sessionSpec))
+inSession = not useSession or not na(time(timeframe.period, sessionSpec, 'UTC'))
 
 // Internal swing detection — same approach as the SMC indicator:
 // a swing is confirmed swingLen bars after the extreme.
@@ -172,7 +188,10 @@ newZone(top, btm, bullish) =>
           , extend = extend.none)
     b
 
-if bullBreak
+modeOk(isChoch) =>
+    breakMode == 'All' or (breakMode == 'CHoCH only') == isChoch
+
+if bullBreak and modeOk(bullChoch)
     [zt, zb] = findZone(true)
     if not na(zt)
         setupDir := 1
@@ -182,7 +201,7 @@ if bullBreak
         box.delete(zoneBox)
         zoneBox := newZone(zt, zb, true)
 
-if bearBreak
+if bearBreak and modeOk(bearChoch)
     [zt, zb] = findZone(false)
     if not na(zt)
         setupDir := -1
@@ -248,7 +267,7 @@ if longOk
     stopPrice := zoneBtm - atr * stopAtrMult
     entryRef  := close
     risk = entryRef - stopPrice
-    if risk > 0
+    if risk >= minRiskPts and risk > 0
         tpPrice := entryRef + risk * rrMult
         strategy.entry('Long', strategy.long)
         setupDir := 0
@@ -257,7 +276,7 @@ if shortOk
     stopPrice := zoneTop + atr * stopAtrMult
     entryRef  := close
     risk = stopPrice - entryRef
-    if risk > 0
+    if risk >= minRiskPts and risk > 0
         tpPrice := entryRef - risk * rrMult
         strategy.entry('Short', strategy.short)
         setupDir := 0
