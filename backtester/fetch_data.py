@@ -134,8 +134,9 @@ def fetch_dukascopy(d_from: dt.date, d_to: dt.date,
             if done % 50 == 0:
                 print(f"  {done}/{len(days)} days, ok={got_days} rows={len(rows)}"
                       f" elapsed={time.monotonic()-started:.0f}s", flush=True)
-            if time.monotonic() - started > budget_secs:
-                print("  time budget exceeded — stopping Dukascopy fetch", flush=True)
+            # dead source detection: nothing but misses early on
+            if (done >= 60 and got_days == 0) or time.monotonic() - started > budget_secs:
+                print("  Dukascopy unreachable/budget exceeded — stopping", flush=True)
                 for f in futs:
                     f.cancel()
                 break
@@ -150,16 +151,26 @@ def fetch_histdata(d_from: dt.date, d_to: dt.date) -> list[tuple]:
 
     rows: list[tuple] = []
     est_to_utc = dt.timedelta(hours=5)  # HistData uses fixed UTC-5, no DST
-    month = dt.date(d_from.year, d_from.month, 1)
-    while month <= d_to:
+    cur_year = dt.date.today().year
+    # HistData packaging: past years -> ONE yearly zip (month must be None);
+    # current year -> one zip per month.
+    jobs: list[tuple[str, str | None]] = []
+    for y in range(d_from.year, min(d_to.year, cur_year - 1) + 1):
+        if y < cur_year:
+            jobs.append((str(y), None))
+    if d_to.year == cur_year:
+        last_m = d_to.month if d_to.year == cur_year else 12
+        for m in range(1, last_m + 1):
+            jobs.append((str(cur_year), str(m)))
+    for year, month in jobs:
         try:
-            path = download_hist_data(year=str(month.year), month=str(month.month),
+            path = download_hist_data(year=year, month=month,
                                       pair="xauusd",
                                       platform=Platform.GENERIC_ASCII,
                                       time_frame=TimeFrame.ONE_MINUTE,
                                       output_directory="hist-tmp", verbose=False)
-        except Exception as e:  # month not published yet, or yearly packaging
-            print(f"  histdata {month:%Y-%m}: {e}", file=sys.stderr)
+        except Exception as e:  # month not published yet, etc.
+            print(f"  histdata {year}-{month}: {e}", file=sys.stderr)
             path = None
         if path and os.path.exists(path):
             with zipfile.ZipFile(path) as zf:
@@ -174,7 +185,6 @@ def fetch_histdata(d_from: dt.date, d_to: dt.date) -> list[tuple]:
                                          float(hi), float(lo), float(cl), float(vol)))
                     except ValueError:
                         continue
-        month = (month.replace(day=28) + dt.timedelta(days=8)).replace(day=1)
     print(f"HistData: {len(rows)} rows")
     return rows
 
