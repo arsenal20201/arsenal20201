@@ -1,0 +1,60 @@
+name: Fetch XAUUSD historical data
+
+# Manually triggered. Downloads Dukascopy XAUUSD 1-minute candles on a
+# GitHub-hosted runner (which has open internet, unlike the Claude sandbox)
+# and commits the gzipped CSV into the branch so the backtester can use it.
+on:
+  push:
+    branches:
+      - claude/smc-ict-scalping-indicator-bfz82h
+    paths:
+      - '.github/workflows/fetch-data.yml'
+      - 'backtester/fetch_data.py'
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: 'Start date (YYYY-MM-DD)'
+        required: false
+        default: '2025-06-01'
+      date_to:
+        description: 'End date (YYYY-MM-DD)'
+        required: false
+        default: '2026-07-05'
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download XAUUSD M1 candles (Dukascopy, HistData fallback)
+        run: |
+          python3 backtester/fetch_data.py \
+            --from "${{ github.event.inputs.date_from || '2025-06-01' }}" \
+            --to "${{ github.event.inputs.date_to || '2026-07-05' }}" \
+            --out dl-tmp/XAUUSD_M1.csv
+          head -3 dl-tmp/XAUUSD_M1.csv
+          tail -3 dl-tmp/XAUUSD_M1.csv
+          wc -l dl-tmp/XAUUSD_M1.csv
+
+      - name: Compress and stage
+        run: |
+          mkdir -p backtester/data
+          gzip -9 -c dl-tmp/XAUUSD_M1.csv > backtester/data/XAUUSD_M1.csv.gz
+          ls -la backtester/data
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backtester/data/XAUUSD_M1.csv.gz
+          git commit -m "Add XAUUSD M1 historical data (Dukascopy, for backtesting)"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push

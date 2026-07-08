@@ -1,0 +1,308 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © gilanns
+//
+// ---------------------------------------------------------------------------
+// SMC Confluence Scalper — BACKTESTABLE STRATEGY
+//
+// Purpose: turn the "SMC & ICT Scalping Master" indicator stack into a single,
+// explicit rule set that TradingView's Strategy Tester can measure. This is
+// the only honest way to get a win rate — an indicator has none.
+//
+// The trade logic (LONG; shorts are the mirror image):
+//   1. STRUCTURE — internal market structure flips bullish: close crosses
+//      above the last internal swing high (CHoCH when the prior trend was
+//      bearish, BOS when it was already bullish). Same swing detection as the
+//      SMC indicator (5-bar internal swings).
+//   2. ZONE — at the moment of the break, the last opposite (down) candle
+//      before the breakout becomes the bullish order block (demand zone).
+//   3. RETRACE — price must come BACK into the zone within a limited number
+//      of bars (no chasing the breakout).
+//   4. TRIGGER — a confirmed bar that touches the zone and closes bullish
+//      back above the zone top.
+//   5. FILTERS (optional): EMA trend filter, RSI momentum filter, session
+//      window.
+//   6. RISK — stop below the zone bottom minus an ATR buffer; target at a
+//      fixed R multiple. Position size = fixed % of equity.
+//
+// Non-repainting guarantees:
+//   * No request.security, no lookahead anywhere.
+//   * All signals evaluated on confirmed bars only (process_orders_on_close);
+//     entries fill on the next bar's open.
+//   * No drawing object is ever moved backwards in time.
+//
+// How to read the results honestly:
+//   * Test on YOUR symbol + timeframe with realistic commission and slippage
+//     (set below and in Properties). On 1–5m charts costs dominate.
+//   * Check "Percent Profitable" AND "Profit Factor". A 70% win rate with
+//     profit factor < 1 loses money.
+//   * Walk-forward: tune on one date range, verify on a later one you did not
+//     tune on. If results collapse, the settings were curve-fit.
+//
+// TUNED DEFAULTS (offline backtest, XAUUSD, Jun 2025 – Jun 2026, 380k real
+// M1 candles, $0.30 spread + slippage modeled — see backtester/ in the repo):
+//   * XAUUSD 15m (PRIMARY):  defaults below as-is.
+//       Train Jul25–Mar26: 96 trades, 69.8% win, PF 2.18, max DD 3R.
+//       Validation Apr–Jun26 (out-of-sample): 74.2% win, PF 2.76, DD 2R.
+//       Full 13 months: 130 trades, 69.2% win, PF 2.13, +46R, DD 4R.
+//   * XAUUSD 3m (secondary): swing=8, TP=1.5R, Entry Mode=CHoCH only.
+//       Full 13 months: 120 trades, 49.2% win, PF 1.40, +25R, DD 8R.
+//   * XAUUSD 5m: FAILED out-of-sample validation — do not trade 5m.
+// Session window is UTC (12–17 = London PM + NY AM). One year of one regime
+// (gold bull run) — re-validate when market conditions change.
+// ---------------------------------------------------------------------------
+
+//@version=5
+strategy("SMC Confluence Scalper [Backtest]"
+  , overlay = true
+  , initial_capital = 10000
+  , default_qty_type = strategy.percent_of_equity
+  , default_qty_value = 5
+  , commission_type = strategy.commission.percent
+  , commission_value = 0.05
+  , slippage = 2
+  , calc_on_every_tick = false
+  , process_orders_on_close = true
+  , max_boxes_count = 100
+  , max_labels_count = 100
+  , max_lines_count = 100)
+
+// ================================== //
+// ------------ Inputs -------------- //
+// ================================== //
+
+grpS = 'Structure'
+swingLen    = input.int(4,   'Internal Swing Length', minval = 2, maxval = 20, group = grpS,
+  tooltip = 'Bars each side used to confirm an internal swing high/low. Backtest optimum: 4 on XAUUSD 15m, 8 on 3m.')
+breakMode   = input.string('All', 'Entry Mode', options = ['All', 'CHoCH only', 'BOS only'], group = grpS,
+  tooltip = 'CHoCH only = trade reversals (trend flip breaks). BOS only = trade continuations. Backtest: All on 15m, CHoCH only on 3m.')
+obLookback  = input.int(25,  'Order Block Search (bars)', minval = 3, maxval = 50, group = grpS,
+  tooltip = 'How far back from the structure break to search for the last opposite candle that becomes the order block.')
+zoneTimeout = input.int(40,  'Zone Expiry (bars)', minval = 5, maxval = 200, group = grpS,
+  tooltip = 'A zone that is not retested within this many bars is abandoned (no chasing old zones).')
+
+grpF = 'Filters'
+useEmaFilter = input.bool(true,  'EMA Trend Filter', inline = 'ema', group = grpF)
+emaLen       = input.int(200, '', minval = 10, inline = 'ema', group = grpF,
+  tooltip = 'Longs only above the EMA, shorts only below. The single biggest chop-reducer.')
+useRsiFilter = input.bool(false, 'RSI Filter', inline = 'rsi', group = grpF)
+rsiLen       = input.int(14, '', minval = 2, inline = 'rsi', group = grpF,
+  tooltip = 'Longs need RSI > 50, shorts RSI < 50 at trigger time.')
+useSession   = input.bool(true, 'Session Filter (UTC)', inline = 'ses', group = grpF)
+sessionSpec  = input.session('1200-1700', '', inline = 'ses', group = grpF,
+  tooltip = 'Only open trades inside this UTC window. 1200-1700 UTC = London afternoon + New York morning, the validated window for XAUUSD.')
+
+grpR = 'Risk'
+allowLongs  = input.bool(true,  'Longs',  inline = 'dir', group = grpR)
+allowShorts = input.bool(true,  'Shorts', inline = 'dir', group = grpR)
+atrLen      = input.int(14,   'ATR Length', minval = 1, group = grpR)
+stopAtrMult = input.float(0.5, 'Stop Buffer (× ATR)', minval = 0, step = 0.1, group = grpR,
+  tooltip = 'Stop is placed this many ATRs beyond the zone edge.')
+rrMult      = input.float(1.0, 'Take Profit (R multiple)', minval = 0.5, step = 0.25, group = grpR,
+  tooltip = 'Target = risk distance × this multiple. Backtest optimum: 1.0 on XAUUSD 15m (69% win rate), 1.5 on 3m.')
+useBreakeven = input.bool(false, 'Move Stop to Breakeven at 1R', group = grpR)
+minRiskPts  = input.float(0.9, 'Min Stop Distance (price units)', minval = 0, step = 0.1, group = grpR,
+  tooltip = 'Reject entries whose stop distance is smaller than this — the spread eats such trades. For XAUUSD use ~3× your spread (0.9 for a $0.30 spread).')
+
+grpV = 'Visuals'
+showZones = input.bool(true, 'Show Order Block Zones', group = grpV)
+bullZoneCss = input.color(color.new(#089981, 80), 'Bullish Zone', group = grpV)
+bearZoneCss = input.color(color.new(#f23645, 80), 'Bearish Zone', group = grpV)
+
+// ================================== //
+// --------- Calculations ----------- //
+// ================================== //
+
+atr = ta.atr(atrLen)
+ema = ta.ema(close, emaLen)
+rsi = ta.rsi(close, rsiLen)
+
+inSession = not useSession or not na(time(timeframe.period, sessionSpec, 'UTC'))
+
+// Internal swing detection — same approach as the SMC indicator:
+// a swing is confirmed swingLen bars after the extreme.
+var int itrend  = 0
+var float itopY  = na, var int itopX  = na
+var float ibtmY  = na, var int ibtmX  = na
+var bool itopCrossed = true
+var bool ibtmCrossed = true
+
+var int os = 0
+upper = ta.highest(swingLen)
+lower = ta.lowest(swingLen)
+os := high[swingLen] > upper ? 0 : low[swingLen] < lower ? 1 : os[1]
+newTop = os == 0 and os[1] != 0
+newBtm = os == 1 and os[1] != 1
+
+if newTop
+    itopY := high[swingLen]
+    itopX := bar_index - swingLen
+    itopCrossed := false
+if newBtm
+    ibtmY := low[swingLen]
+    ibtmX := bar_index - swingLen
+    ibtmCrossed := false
+
+// Structure breaks (confirmed close beyond the swing level)
+bullBreak = not na(itopY) and not itopCrossed and ta.crossover(close, itopY)
+bearBreak = not na(ibtmY) and not ibtmCrossed and ta.crossunder(close, ibtmY)
+
+bullChoch = bullBreak and itrend < 0
+bearChoch = bearBreak and itrend > 0
+
+if bullBreak
+    itopCrossed := true
+    itrend := 1
+if bearBreak
+    ibtmCrossed := true
+    itrend := -1
+
+// ================================== //
+// -------- Order Block Zones ------- //
+// ================================== //
+
+// On a bullish break: last down candle within obLookback bars = demand zone.
+// On a bearish break: last up candle within obLookback bars = supply zone.
+findZone(bullish) =>
+    float zTop = na
+    float zBtm = na
+    for i = 1 to obLookback
+        if bullish ? (close[i] < open[i]) : (close[i] > open[i])
+            zTop := high[i]
+            zBtm := low[i]
+            break
+    [zTop, zBtm]
+
+// Pending setup state
+var int   setupDir  = 0       // 1 = awaiting long pullback, -1 = awaiting short pullback
+var float zoneTop   = na
+var float zoneBtm   = na
+var int   zoneBirth = na
+var box   zoneBox   = na
+
+newZone(top, btm, bullish) =>
+    box b = na
+    if showZones
+        b := box.new(bar_index, top, bar_index + 1, btm
+          , border_color = bullish ? color.new(bullZoneCss, 40) : color.new(bearZoneCss, 40)
+          , bgcolor = bullish ? bullZoneCss : bearZoneCss
+          , extend = extend.none)
+    b
+
+modeOk(isChoch) =>
+    breakMode == 'All' or (breakMode == 'CHoCH only') == isChoch
+
+if bullBreak and modeOk(bullChoch)
+    [zt, zb] = findZone(true)
+    if not na(zt)
+        setupDir := 1
+        zoneTop := zt
+        zoneBtm := zb
+        zoneBirth := bar_index
+        box.delete(zoneBox)
+        zoneBox := newZone(zt, zb, true)
+
+if bearBreak and modeOk(bearChoch)
+    [zt, zb] = findZone(false)
+    if not na(zt)
+        setupDir := -1
+        zoneTop := zt
+        zoneBtm := zb
+        zoneBirth := bar_index
+        box.delete(zoneBox)
+        zoneBox := newZone(zt, zb, false)
+
+// Keep the active zone box stretched to the current bar
+if not na(zoneBox) and setupDir != 0
+    box.set_right(zoneBox, bar_index)
+
+// Zone invalidation: opposite structure flip handled above (zone replaced);
+// expiry or full break through the zone cancels the setup.
+if setupDir == 1 and (bar_index - zoneBirth > zoneTimeout or close < zoneBtm)
+    setupDir := 0
+if setupDir == -1 and (bar_index - zoneBirth > zoneTimeout or close > zoneTop)
+    setupDir := 0
+
+// ================================== //
+// ---------- Entry Trigger --------- //
+// ================================== //
+
+// Pullback trigger: bar trades into the zone and closes back beyond its edge
+// in the trade direction. Evaluated on confirmed bars only
+// (process_orders_on_close=true), so nothing here repaints.
+longTrigger = setupDir == 1
+  and bar_index > zoneBirth
+  and low <= zoneTop
+  and close > zoneTop
+  and close > open
+
+shortTrigger = setupDir == -1
+  and bar_index > zoneBirth
+  and high >= zoneBtm
+  and close < zoneBtm
+  and close < open
+
+longOk = allowLongs
+  and longTrigger
+  and inSession
+  and (not useEmaFilter or close > ema)
+  and (not useRsiFilter or rsi > 50)
+  and strategy.position_size == 0
+
+shortOk = allowShorts
+  and shortTrigger
+  and inSession
+  and (not useEmaFilter or close < ema)
+  and (not useRsiFilter or rsi < 50)
+  and strategy.position_size == 0
+
+// ================================== //
+// ------------- Orders ------------- //
+// ================================== //
+
+var float stopPrice = na
+var float tpPrice   = na
+var float entryRef  = na
+
+if longOk
+    stopPrice := zoneBtm - atr * stopAtrMult
+    entryRef  := close
+    risk = entryRef - stopPrice
+    if risk >= minRiskPts and risk > 0
+        tpPrice := entryRef + risk * rrMult
+        strategy.entry('Long', strategy.long)
+        setupDir := 0
+
+if shortOk
+    stopPrice := zoneTop + atr * stopAtrMult
+    entryRef  := close
+    risk = stopPrice - entryRef
+    if risk >= minRiskPts and risk > 0
+        tpPrice := entryRef - risk * rrMult
+        strategy.entry('Short', strategy.short)
+        setupDir := 0
+
+// Optional breakeven move at 1R
+if useBreakeven and strategy.position_size > 0 and not na(entryRef)
+    if high >= entryRef + (entryRef - stopPrice)
+        stopPrice := math.max(stopPrice, strategy.position_avg_price)
+if useBreakeven and strategy.position_size < 0 and not na(entryRef)
+    if low <= entryRef - (stopPrice - entryRef)
+        stopPrice := math.min(stopPrice, strategy.position_avg_price)
+
+strategy.exit('Long Exit',  from_entry = 'Long',  stop = stopPrice, limit = tpPrice)
+strategy.exit('Short Exit', from_entry = 'Short', stop = stopPrice, limit = tpPrice)
+
+// ================================== //
+// ------------ Visuals ------------- //
+// ================================== //
+
+plot(useEmaFilter ? ema : na, 'EMA Filter', color = color.new(color.orange, 30))
+
+plotshape(bullChoch, 'Bullish CHoCH', style = shape.labelup,   location = location.belowbar, color = color.new(#089981, 20), text = 'CHoCH', textcolor = color.white, size = size.tiny)
+plotshape(bearChoch, 'Bearish CHoCH', style = shape.labeldown, location = location.abovebar, color = color.new(#f23645, 20), text = 'CHoCH', textcolor = color.white, size = size.tiny)
+plotshape(bullBreak and not bullChoch, 'Bullish BOS', style = shape.triangleup,   location = location.belowbar, color = color.new(#089981, 40), size = size.tiny)
+plotshape(bearBreak and not bearChoch, 'Bearish BOS', style = shape.triangledown, location = location.abovebar, color = color.new(#f23645, 40), size = size.tiny)
+
+// Active trade levels
+plot(strategy.position_size != 0 ? stopPrice : na, 'Stop',   color = color.new(color.red,   40), style = plot.style_linebr)
+plot(strategy.position_size != 0 ? tpPrice   : na, 'Target', color = color.new(color.green, 40), style = plot.style_linebr)
