@@ -38,7 +38,7 @@
 // ║ "Confirm signals on bar close" enabled they are only committed on a closed   ║
 // ║ bar, which removes intrabar flicker. No future data, no lookahead_on.        ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
-indicator("SMC Multi-Timeframe Intelligence", "SMC MTF Intel", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500, max_bars_back = 500)
+indicator("SMC Multi-Timeframe Intelligence", "SMC MTF", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500, max_bars_back = 500)
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  INPUTS
@@ -163,6 +163,7 @@ maxSignalLbl = input.int(60, "Max signal Labels", minval = 5, maxval = 400, grou
 maxSignalLn  = input.int(60, "Max signal Lines",  minval = 5, maxval = 400, group = gPRF)
 maxSignalBx  = input.int(40, "Max signal Boxes",  minval = 5, maxval = 400, group = gPRF)
 swingMem     = input.int(24, "Swings kept in memory", minval = 6, maxval = 60, group = gPRF, tooltip = "Feeds S/R and the trend-line engine. Higher = more history, heavier.")
+drawMaxBack  = input.int(3000, "Max drawing look-back (bars)", minval = 200, maxval = 9000, group = gPRF, tooltip = "Pine refuses a bar_index drawing coordinate that sits more than ~10000 bars from the current bar.\nAn S/R level or trend line born before this many bars is anchored at the cap instead (its price is unchanged), and FVG/OB zones older than this are retired.")
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  TYPES — every engine stores its own state in a strongly typed object
@@ -451,12 +452,12 @@ bool cleanTop = cleanMode and msEvent
 // ── Structure drawings ────────────────────────────────────────────────────────
 if enableMS and ((bosUp and showBOS) or (chochUp and showCHOCH))
     if showMSLine and not na(msTopBar)
-        regLn(line.new(msTopBar, msTop, bar_index, msTop, color = bullCol, style = line.style_dashed, width = 1), maxSignalLn)
+        regLn(line.new(math.max(msTopBar, bar_index - drawMaxBack), msTop, bar_index, msTop, color = bullCol, style = line.style_dashed, width = 1), maxSignalLn)
     regLbl(label.new(bar_index, msTop + atr * (0.4 + 0.45 * lblStack()), chochUp ? "CHOCH ↑" : "BOS ↑", style = label.style_label_down, color = color.new(bullCol, 15), textcolor = txtCol, size = size.tiny), maxSignalLbl)
 
 if enableMS and ((bosDn and showBOS) or (chochDn and showCHOCH))
     if showMSLine and not na(msBotBar)
-        regLn(line.new(msBotBar, msBot, bar_index, msBot, color = bearCol, style = line.style_dashed, width = 1), maxSignalLn)
+        regLn(line.new(math.max(msBotBar, bar_index - drawMaxBack), msBot, bar_index, msBot, color = bearCol, style = line.style_dashed, width = 1), maxSignalLn)
     regLbl(label.new(bar_index, msBot - atr * (0.4 + 0.45 * lblStack()), chochDn ? "CHOCH ↓" : "BOS ↓", style = label.style_label_up, color = color.new(bearCol, 15), textcolor = txtCol, size = size.tiny), maxSignalLbl)
 
 // ── Priority 8: swing + HH/HL/LH/LL labels (drawn last, suppressed first) ─────
@@ -568,10 +569,15 @@ if barstate.islast
                 color c = isSup ? bullCol : bearCol
                 float tol = atr * srSens * 0.5
                 int x2 = srExtend ? bar_index + 20 : bar_index
+                // A level can be many thousands of bars old.  Pine rejects a
+                // bar_index coordinate too far from the current bar, so the left
+                // edge is clamped; the level's PRICE is what matters, not where
+                // it was first printed.
+                int x1 = math.max(lv.bornBar, bar_index - drawMaxBack)
                 if srStyle == "Zones"
-                    array.push(srBoxes, box.new(lv.bornBar, lv.price + tol, x2, lv.price - tol, border_color = color.new(c, 40), bgcolor = color.new(c, 88), border_width = 1))
+                    array.push(srBoxes, box.new(x1, lv.price + tol, x2, lv.price - tol, border_color = color.new(c, 40), bgcolor = color.new(c, 88), border_width = 1))
                 else
-                    array.push(srLines, line.new(lv.bornBar, lv.price, x2, lv.price, color = color.new(c, 20), style = line.style_solid, width = 2))
+                    array.push(srLines, line.new(x1, lv.price, x2, lv.price, color = color.new(c, 20), style = line.style_solid, width = 2))
                 if srShowInfo
                     string t = (isSup ? "S " : "R ") + str.tostring(lv.price, format.mintick) + "  ×" + str.tostring(lv.tests) + "  ⚡" + str.tostring(lv.strength, "#.#")
                     array.push(srLabels, label.new(x2, lv.price, t, style = label.style_label_left, color = color.new(c, 75), textcolor = txtCol, size = size.tiny))
@@ -663,7 +669,10 @@ if enableTL and newSL and barOK
         int   b2 = int(array.get(tlOut, 3))
         float p1 = array.get(tlOut, 0)
         float p2 = array.get(tlOut, 2)
-        line ln = line.new(b1, p1, b2, p2, extend = tlExtend ? extend.right : extend.none, color = color.new(bullCol, 20), style = line.style_solid, width = 2)
+        // clamp the anchor the same way; lineY() keeps the slope identical
+        int   dx1 = math.max(b1, bar_index - drawMaxBack)
+        float dy1 = lineY(p1, b1, p2, b2, dx1)
+        line ln = line.new(dx1, dy1, b2, p2, extend = tlExtend ? extend.right : extend.none, color = color.new(bullCol, 20), style = line.style_solid, width = 2)
         tlPush(TrLine.new(p1 = p1, b1 = b1, p2 = p2, b2 = b2, bull = true, touches = int(array.get(tlOut, 4)), broken = false, ln = ln), tlMax)
 
 if enableTL and newSH and barOK
@@ -673,7 +682,10 @@ if enableTL and newSH and barOK
         int   b2 = int(array.get(tlOut, 3))
         float p1 = array.get(tlOut, 0)
         float p2 = array.get(tlOut, 2)
-        line ln = line.new(b1, p1, b2, p2, extend = tlExtend ? extend.right : extend.none, color = color.new(bearCol, 20), style = line.style_solid, width = 2)
+        // clamp the anchor the same way; lineY() keeps the slope identical
+        int   dx1 = math.max(b1, bar_index - drawMaxBack)
+        float dy1 = lineY(p1, b1, p2, b2, dx1)
+        line ln = line.new(dx1, dy1, b2, p2, extend = tlExtend ? extend.right : extend.none, color = color.new(bearCol, 20), style = line.style_solid, width = 2)
         tlPush(TrLine.new(p1 = p1, b1 = b1, p2 = p2, b2 = b2, bull = false, touches = int(array.get(tlOut, 4)), broken = false, ln = ln), tlMax)
 
 // ── Trend line break detection ────────────────────────────────────────────────
@@ -841,6 +853,12 @@ if enableFVG and array.size(fvgArr) > 0
     float mitDn = fvgMitSrc == "Wick" ? high : math.max(close, open)
     for i = array.size(fvgArr) - 1 to 0
         FvgZone z = array.get(fvgArr, i)
+        // retire a zone whose left edge has drifted out of Pine's drawing range
+        if bar_index - z.bornBar > drawMaxBack
+            delBx(z.bx)
+            delLbl(z.lb)
+            array.remove(fvgArr, i)
+            continue
         if fvgExtend and z.state < 2 and not na(z.bx)
             box.set_right(z.bx, bar_index)
             if not na(z.lb)
@@ -983,6 +1001,11 @@ if enableOB and barOK and obBearTrigger
 if enableOB and array.size(obArr) > 0
     for i = array.size(obArr) - 1 to 0
         ObZone o = array.get(obArr, i)
+        if bar_index - o.bornBar > drawMaxBack
+            delBx(o.bx)
+            delLbl(o.lb)
+            array.remove(obArr, i)
+            continue
         if obExtend and o.state < 3 and not na(o.bx)
             box.set_right(o.bx, bar_index)
             if not na(o.lb)
