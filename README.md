@@ -135,5 +135,16 @@ Key knobs to tune for win rate vs. profitability:
 MQL5/
   Experts/
     HighWinRateEA.mq5   # the Expert Advisor
+.claude/skills/
+  tradingagents/        # Claude Code skill: TradingAgents multi-agent research
 README.md               # this file
 ```
+
+## Claude Code skill: TradingAgents
+
+`.claude/skills/tradingagents/` adds the [TradingAgents](https://github.com/TauricResearch/TradingAgents)
+multi-agent LLM research framework as a skill: installation, provider/data-vendor
+configuration, the agent graph, backtesting, and rules for combining its
+Buy/Overweight/Hold/Underweight/Sell ratings with this EA. TradingAgents is a
+research scaffold — use a rating as a daily directional filter at most, and never
+let it touch position sizing or the daily loss limit.
