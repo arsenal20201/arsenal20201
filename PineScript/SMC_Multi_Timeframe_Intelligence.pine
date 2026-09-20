@@ -1,0 +1,1330 @@
+//@version=6
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SMC MULTI-TIMEFRAME INTELLIGENCE                                            ║
+// ║  Market Structure · Liquidity · FVG · Order Blocks · Divergence · MTF        ║
+// ║  Pine Script v6                                                              ║
+// ╠══════════════════════════════════════════════════════════════════════════════╣
+// ║ ARCHITECTURE — 11 engines. Each one can be switched off independently from   ║
+// ║ Settings. Engines 2..8 all consume the SAME confirmed-pivot feed produced by ║
+// ║ engine 1, so they never disagree with each other.                            ║
+// ║                                                                              ║
+// ║  1  SWING ENGINE .......... ta.pivothigh / ta.pivotlow -> confirmed swings   ║
+// ║                             stored in bounded parallel arrays (price, bar).  ║
+// ║  2  MARKET STRUCTURE ...... labels HH/HL/LH/LL, tracks the last UNBROKEN     ║
+// ║                             swing high/low and emits BOS / CHOCH.            ║
+// ║  3  SUPPORT / RESISTANCE .. clusters confirmed swings into levels that store ║
+// ║                             price, tests, strength, last-test bar.           ║
+// ║  4  TREND LINE ENGINE ..... brute-force best anchor pair over the last N     ║
+// ║                             swings, validated + break detection.             ║
+// ║  5  LIQUIDITY ENGINE ...... BSL above swing highs / SSL below swing lows,    ║
+// ║                             sweep confirmed by wick or by close-back.        ║
+// ║  6  FVG ENGINE ............ 3-candle imbalance, FRESH/PARTIAL/MITIGATED.     ║
+// ║  7  ORDER BLOCK ENGINE .... last opposite candle before displacement/BOS,    ║
+// ║                             strength score + FRESH/TESTED/MITIGATED/INVALID. ║
+// ║  8  DIVERGENCE ENGINE ..... RSI pivots vs price pivots, regular + hidden.    ║
+// ║  9  MULTI-TIMEFRAME ....... the structure state machine is re-run inside     ║
+// ║                             request.security() with lookahead_off.           ║
+// ║ 10  OBJECT MANAGER ........ every drawing lives in a capped array; the       ║
+// ║                             oldest object is deleted before a new one is     ║
+// ║                             created, so the TradingView limits are never hit.║
+// ║ 11  ALERT ENGINE .......... one alertcondition() per event.                  ║
+// ║                                                                              ║
+// ║ NON-REPAINTING — read this:                                                  ║
+// ║ A pivot does not exist until `Pivot Length` bars have closed to its RIGHT.   ║
+// ║ That delay is inherent to pivot logic and applies to swings, structure, S/R, ║
+// ║ trend lines, liquidity levels and divergence. Everything derived from a      ║
+// ║ pivot is therefore a CONFIRMED (but delayed) signal. Break-type events (BOS, ║
+// ║ CHOCH, sweeps, FVG, OB) are evaluated against the CURRENT bar; with          ║
+// ║ "Confirm signals on bar close" enabled they are only committed on a closed   ║
+// ║ bar, which removes intrabar flicker. No future data, no lookahead_on.        ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+indicator("SMC Multi-Timeframe Intelligence", "SMC MTF", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500, max_bars_back = 500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+gGEN = "◆ GENERAL"
+gSWG = "◆ SWINGS"
+gMS = "◆ MARKET STRUCTURE"
+gSR = "◆ SUPPORT & RESISTANCE"
+gTL = "◆ TREND LINES"
+gLQ = "◆ LIQUIDITY"
+gFV = "◆ FAIR VALUE GAP"
+gOB = "◆ ORDER BLOCK"
+gDV = "◆ DIVERGENCE"
+gMTF = "◆ MTF TABLE"
+gCF = "◆ CONFLUENCE"
+gPRF = "◆ PERFORMANCE / OBJECT LIMITS"
+
+// ── GENERAL ───────────────────────────────────────────────────────────────────
+waitClose  = input.bool(true,  "Confirm signals on bar close (non-repaint)", group = gGEN, tooltip = "ON  = an event is only committed when the bar is closed. Nothing flickers intrabar.\nOFF = events appear live and may disappear again before the bar closes.")
+cleanMode  = input.bool(true,  "Clean chart mode (priority filtering)",      group = gGEN, tooltip = "Hides the lowest-priority labels (minor swings, HH/HL text, divergence) whenever a higher priority event already printed on the same bar.")
+atrLen     = input.int(14,     "ATR length (all size filters use it)",       minval = 2, maxval = 200, group = gGEN)
+bullCol    = input.color(#089981, "Bullish", inline = "col", group = gGEN)
+bearCol    = input.color(#f23645, "Bearish", inline = "col", group = gGEN)
+neutCol    = input.color(#787b86, "Neutral", inline = "col", group = gGEN)
+txtCol     = input.color(#ffffff, "Label text", group = gGEN)
+
+// ── SWINGS ────────────────────────────────────────────────────────────────────
+enableSwing = input.bool(true, "Show Swing Engine drawings", group = gSWG, tooltip = "The confirmed-pivot FEED always runs, because Market Structure, S/R, Trend Lines and Liquidity are all built on top of it.\nThis switch only controls the SH / SL drawings.")
+pivotLen    = input.int(5,  "Pivot Length (minor)", minval = 1, maxval = 50, group = gSWG, tooltip = "Bars required on BOTH sides of a pivot. This is also the confirmation delay.")
+majorLen    = input.int(15, "Pivot Length (major)", minval = 2, maxval = 100, group = gSWG)
+minSwingATR = input.float(0.0, "Minimum Swing Distance (× ATR)", minval = 0.0, maxval = 10.0, step = 0.1, group = gSWG, tooltip = "A new swing is ignored when it is closer than this to the previous swing of the same type. 0 = filter off.")
+showSwingLb = input.bool(true,  "Show Swing Labels (SH / SL)", group = gSWG)
+showMajorSw = input.bool(true,  "Show Major Swings", group = gSWG)
+showMinorSw = input.bool(false, "Show Minor Swings", group = gSWG)
+
+// ── MARKET STRUCTURE ──────────────────────────────────────────────────────────
+enableMS   = input.bool(true, "Show Market Structure", group = gMS)
+showBOS    = input.bool(true, "Show BOS",   group = gMS)
+showCHOCH  = input.bool(true, "Show CHOCH", group = gMS)
+showHHLL   = input.bool(true, "Show HH / HL / LH / LL", group = gMS)
+msBreakSrc = input.string("Close", "Break confirmation", options = ["Close", "Wick"], group = gMS, tooltip = "Close = the candle must CLOSE beyond the swing (stricter, fewer false breaks).\nWick  = touching the swing with a wick is enough.")
+showMSLine = input.bool(true, "Draw the broken structure line", group = gMS)
+
+// ── SUPPORT & RESISTANCE ──────────────────────────────────────────────────────
+enableSR   = input.bool(true,  "Enable S/R", group = gSR)
+srSens     = input.float(0.5,  "Sensitivity (× ATR merge distance)", minval = 0.05, maxval = 5.0, step = 0.05, group = gSR, tooltip = "Swings closer than this are merged into one level.")
+srMinTests = input.int(2,      "Minimum Tests", minval = 1, maxval = 20, group = gSR)
+srMaxLvl   = input.int(6,      "Maximum Levels", minval = 1, maxval = 20, group = gSR)
+srExtend   = input.bool(true,  "Extend Levels to the right", group = gSR)
+srStyle    = input.string("Zones", "Draw as", options = ["Zones", "Lines"], group = gSR)
+srShowInfo = input.bool(true,  "Show level info (tests / strength)", group = gSR)
+
+// ── TREND LINES ───────────────────────────────────────────────────────────────
+enableTL   = input.bool(true, "Enable Trend Lines", group = gTL)
+tlExtend   = input.bool(true, "Extend to the right", group = gTL)
+tlMinTouch = input.int(2,  "Minimum Touches", minval = 2, maxval = 10, group = gTL)
+tlTolATR   = input.float(0.35, "Touch tolerance (× ATR)", minval = 0.05, maxval = 3.0, step = 0.05, group = gTL)
+tlLookSw   = input.int(6,  "Swings scanned per rebuild", minval = 3, maxval = 12, group = gTL, tooltip = "Higher = better lines, heavier calculation. Only runs when a new swing is confirmed.")
+tlMinBars  = input.int(10, "Minimum length (bars)", minval = 3, maxval = 200, group = gTL, tooltip = "Lines shorter than this are discarded as noise.")
+tlShowBrk  = input.bool(true, "Show Breaks", group = gTL)
+tlMax      = input.int(4,  "Maximum Trend Lines", minval = 1, maxval = 10, group = gTL)
+
+// ── LIQUIDITY ─────────────────────────────────────────────────────────────────
+enableLiq  = input.bool(true, "Enable Liquidity Engine", group = gLQ)
+liqShowLvl = input.bool(true, "Show BSL / SSL pools", group = gLQ)
+liqMode    = input.string("Wick Sweep", "Sweep confirmation", options = ["Wick Sweep", "Close Confirmation"], group = gLQ, tooltip = "Wick Sweep        = the SAME candle pierces the level and closes back inside.\nClose Confirmation = price may close beyond the level, the sweep is validated when it closes back inside within N bars.")
+liqBackBars = input.int(5, "Close-back window (bars)", minval = 1, maxval = 50, group = gLQ, tooltip = "Only used by 'Close Confirmation'.")
+liqMax     = input.int(8,  "Max pools per side", minval = 1, maxval = 25, group = gLQ)
+liqUseMajor = input.bool(false, "Use major swings only", group = gLQ)
+
+// ── FVG ───────────────────────────────────────────────────────────────────────
+enableFVG  = input.bool(true, "Enable FVG", group = gFV)
+fvgMinATR  = input.float(0.15, "Minimum FVG size (× ATR)", minval = 0.0, maxval = 5.0, step = 0.05, group = gFV)
+fvgMax     = input.int(8, "Maximum FVGs", minval = 1, maxval = 30, group = gFV)
+fvgExtend  = input.bool(true, "Extend FVG to current bar", group = gFV)
+fvgMitSrc  = input.string("Wick", "Mitigation source", options = ["Wick", "Close"], group = gFV)
+fvgOnMit   = input.string("Hide", "On mitigation", options = ["Keep", "Hide", "Delete"], group = gFV)
+fvgShowMit = input.bool(true, "Show mitigation state text", group = gFV)
+
+// ── ORDER BLOCKS ──────────────────────────────────────────────────────────────
+enableOB   = input.bool(true, "Enable Order Blocks", group = gOB)
+obDispATR  = input.float(1.2, "Displacement threshold (× ATR)", minval = 0.2, maxval = 10.0, step = 0.1, group = gOB)
+obLookback = input.int(12, "Look-back for the origin candle", minval = 2, maxval = 30, group = gOB)
+obMax      = input.int(6,  "Maximum OBs", minval = 1, maxval = 20, group = gOB)
+obExtend   = input.bool(true, "Extend OB to current bar", group = gOB)
+obUseBody  = input.bool(false, "Use candle body only", group = gOB)
+obShowStr  = input.bool(true, "Show Strength score", group = gOB)
+obDelInval = input.bool(true, "Delete Invalidated OBs", group = gOB)
+obOnlyBOS  = input.bool(false, "Only OBs that caused BOS / CHOCH", group = gOB)
+
+// ── DIVERGENCE ────────────────────────────────────────────────────────────────
+enableDiv  = input.bool(true, "Enable Divergence", group = gDV)
+rsiLen     = input.int(14, "RSI Length", minval = 2, maxval = 100, group = gDV)
+divLb      = input.int(5,  "Pivot Length", minval = 1, maxval = 30, group = gDV)
+divRegular = input.bool(true,  "Regular Divergence", group = gDV)
+divHidden  = input.bool(false, "Hidden Divergence",  group = gDV)
+divMinBars = input.int(5,  "Min bars between pivots", minval = 1, maxval = 100, group = gDV)
+divMaxBars = input.int(60, "Max bars between pivots", minval = 5, maxval = 400, group = gDV)
+
+// ── MTF TABLE ─────────────────────────────────────────────────────────────────
+showTable  = input.bool(true, "Show MTF Table", group = gMTF)
+tblPosStr  = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group = gMTF)
+tblSize    = input.string("Small", "Table text size", options = ["Tiny", "Small", "Normal"], group = gMTF)
+mtfShowTr  = input.bool(true, "Show Trend", group = gMTF)
+mtfShowSt  = input.bool(true, "Show Structure", group = gMTF)
+mtfShowEv  = input.bool(true, "Show BOS / CHOCH", group = gMTF)
+mtfPivot   = input.int(5, "MTF Pivot Length", minval = 2, maxval = 30, group = gMTF)
+mtfConfirm = input.bool(true, "Use last CLOSED HTF bar only", group = gMTF, tooltip = "ON  = the table reads the previous, fully closed higher-timeframe bar. Slower to update, 100% free of intrabar repainting.\nOFF = live HTF values (still lookahead_off, so no future data, but the current HTF bar is still forming).")
+tf1 = input.timeframe("1D",  "TF 1", group = gMTF)
+tf2 = input.timeframe("240", "TF 2", group = gMTF)
+tf3 = input.timeframe("60",  "TF 3", group = gMTF)
+tf4 = input.timeframe("15",  "TF 4", group = gMTF)
+tf5 = input.timeframe("5",   "TF 5", group = gMTF)
+
+// ── CONFLUENCE ────────────────────────────────────────────────────────────────
+enableConf = input.bool(true, "Enable Confluence Engine", group = gCF)
+confWindow = input.int(10, "Confluence window (bars)", minval = 2, maxval = 100, group = gCF, tooltip = "How many bars back an event still counts as part of the same setup.")
+confMin    = input.int(3,  "Minimum factors to print", minval = 2, maxval = 5, group = gCF)
+
+// ── PERFORMANCE ───────────────────────────────────────────────────────────────
+maxSignalLbl = input.int(60, "Max signal Labels", minval = 5, maxval = 400, group = gPRF)
+maxSignalLn  = input.int(60, "Max signal Lines",  minval = 5, maxval = 400, group = gPRF)
+maxSignalBx  = input.int(40, "Max signal Boxes",  minval = 5, maxval = 400, group = gPRF)
+swingMem     = input.int(24, "Swings kept in memory", minval = 6, maxval = 60, group = gPRF, tooltip = "Feeds S/R and the trend-line engine. Higher = more history, heavier.")
+drawMaxBack  = input.int(3000, "Max drawing look-back (bars)", minval = 200, maxval = 9000, group = gPRF, tooltip = "Pine refuses a bar_index drawing coordinate that sits more than ~10000 bars from the current bar.\nAn S/R level or trend line born before this many bars is anchored at the cap instead (its price is unchanged), and FVG/OB zones older than this are retired.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TYPES — every engine stores its own state in a strongly typed object
+// ══════════════════════════════════════════════════════════════════════════════
+// Support / Resistance level
+type SRLvl
+    float price
+    int   tests
+    int   lastBar     // bar index of the most recent test
+    int   bornBar
+    float strength
+
+// Fair Value Gap.  state: 0 = FRESH, 1 = PARTIAL, 2 = MITIGATED
+type FvgZone
+    float top
+    float bot
+    int   bornBar
+    bool  bull
+    int   state
+    box   bx
+    label lb
+
+// Order Block.  state: 0 = FRESH, 1 = TESTED, 2 = MITIGATED, 3 = INVALIDATED
+type ObZone
+    float top
+    float bot
+    int   bornBar
+    bool  bull
+    int   state
+    float score
+    bool  fromBOS
+    box   bx
+    label lb
+
+// Trend line (two confirmed anchors, never a future point)
+type TrLine
+    float p1
+    int   b1
+    float p2
+    int   b2
+    bool  bull
+    int   touches
+    bool  broken
+    line  ln
+
+// Liquidity pool sitting above a swing high (BSL) or below a swing low (SSL)
+type LiqPool
+    float price
+    int   bornBar
+    bool  buySide
+    bool  taken       // price already traded through the level
+    int   takenBar
+    bool  swept       // sweep fully confirmed
+    line  ln
+    label lb
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 10 — DRAWING / OBJECT MANAGER
+//  Pine allows max 500 lines / boxes / labels.  Every drawing this script makes
+//  is pushed into a capped array; when the cap is exceeded the OLDEST object is
+//  deleted first, so the hard limit can never be reached and nothing leaks.
+//  NOTE: arrays are references, therefore a function IS allowed to mutate them
+//  (assigning to a global variable from inside a function is not).
+// ══════════════════════════════════════════════════════════════════════════════
+var array<label> poolLbl = array.new<label>()
+var array<line>  poolLn  = array.new<line>()
+
+regLbl(label l, int cap) =>
+    array.push(poolLbl, l)
+    while array.size(poolLbl) > cap
+        label.delete(array.shift(poolLbl))
+    l
+
+regLn(line l, int cap) =>
+    array.push(poolLn, l)
+    while array.size(poolLn) > cap
+        line.delete(array.shift(poolLn))
+    l
+
+// na-safe deletes: a drawing field is na whenever the matching display option
+// is switched off, so every delete goes through these guards.
+delLbl(label l) =>
+    bool ok = not na(l)
+    if ok
+        label.delete(l)
+    ok
+delLn(line l) =>
+    bool ok = not na(l)
+    if ok
+        line.delete(l)
+    ok
+delBx(box b) =>
+    bool ok = not na(b)
+    if ok
+        box.delete(b)
+    ok
+
+// Anti-overlap helper: counts how many labels were already printed on this bar
+// so the next one can be pushed further away from price.  State lives in an
+// array because functions may mutate array contents but not global scalars.
+var array<int> stkState = array.new<int>(2, -1)
+lblStack() =>
+    int lastB = array.get(stkState, 0)
+    int cnt   = array.get(stkState, 1)
+    int res   = bar_index == lastB ? cnt + 1 : 0
+    array.set(stkState, 0, bar_index)
+    array.set(stkState, 1, res)
+    res
+
+// Geometry helper for trend lines (pure maths, no series access)
+lineY(float p1, int b1, float p2, int b2, int bx) =>
+    float slope = b2 == b1 ? 0.0 : (p2 - p1) / float(b2 - b1)
+    p1 + slope * float(bx - b1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SHARED CONTEXT
+// ══════════════════════════════════════════════════════════════════════════════
+// nz() guard: ta.atr() is na for the first `atrLen` bars, and every size filter
+// in this script divides by / compares against it.
+atr = nz(ta.atr(atrLen), ta.tr(true))
+// barOK gates every state change.  With "Confirm on bar close" the whole script
+// behaves as if it only existed on closed bars => no intrabar repainting.
+barOK = not waitClose or barstate.isconfirmed
+// Global box budget: FVG and OB boxes are owned by their own engine arrays, so
+// the "Max Boxes" setting is enforced by clamping those caps.  S/R boxes are
+// capped separately by srMaxLvl and are rebuilt (not accumulated) each last bar.
+int fvgCap = int(math.max(1, math.min(fvgMax, maxSignalBx / 2)))
+int obCap  = int(math.max(1, math.min(obMax,  maxSignalBx / 2)))
+
+// Alert flags (plain bools, rebuilt every bar, consumed by alertcondition())
+bool evBullBOS   = false
+bool evBearBOS   = false
+bool evBullCHOCH = false
+bool evBearCHOCH = false
+bool evBSLSweep  = false
+bool evSSLSweep  = false
+bool evBullFVG   = false
+bool evBearFVG   = false
+bool evBullOB    = false
+bool evBearOB    = false
+bool evBullDiv   = false
+bool evBearDiv   = false
+bool evBullConf  = false
+bool evBearConf  = false
+bool evTrendFlip = false
+bool evTLBreakUp = false
+bool evTLBreakDn = false
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 1 — SWING ENGINE
+//  ta.pivothigh(len, len) returns a value only after `len` bars closed to the
+//  right of the candidate.  ►► NATURAL DELAY: a swing is always reported
+//  `pivotLen` bars late.  That is the price of a non-repainting pivot.
+// ══════════════════════════════════════════════════════════════════════════════
+phMinor = ta.pivothigh(high, pivotLen, pivotLen)
+plMinor = ta.pivotlow(low,  pivotLen, pivotLen)
+phMajor = ta.pivothigh(high, majorLen, majorLen)
+plMajor = ta.pivotlow(low,  majorLen, majorLen)
+
+var array<float> shPrice = array.new<float>()
+var array<int>   shBar   = array.new<int>()
+var array<float> slPrice = array.new<float>()
+var array<int>   slBar   = array.new<int>()
+
+// "new confirmed swing" flags consumed by the other engines on this same bar.
+// The feed below is NOT gated by enableSwing — that switch only hides drawings.
+bool newSH = false
+bool newSL = false
+float curSH = na
+float curSL = na
+int   curSHBar = na
+int   curSLBar = na
+string shTag = ""
+string slTag = ""
+
+if barOK and not na(phMinor)
+    float p = phMinor
+    int   b = bar_index - pivotLen
+    // Minimum swing distance filter (0 = off)
+    bool accept = true
+    if minSwingATR > 0.0 and array.size(shPrice) > 0
+        accept := math.abs(p - array.get(shPrice, array.size(shPrice) - 1)) >= minSwingATR * atr
+    if accept
+        // HH / LH classification against the previous confirmed swing high
+        if array.size(shPrice) > 0
+            shTag := p > array.get(shPrice, array.size(shPrice) - 1) ? "HH" : "LH"
+        array.push(shPrice, p)
+        array.push(shBar, b)
+        while array.size(shPrice) > swingMem
+            array.shift(shPrice)
+            array.shift(shBar)
+        newSH    := true
+        curSH    := p
+        curSHBar := b
+
+if barOK and not na(plMinor)
+    float p = plMinor
+    int   b = bar_index - pivotLen
+    bool accept = true
+    if minSwingATR > 0.0 and array.size(slPrice) > 0
+        accept := math.abs(p - array.get(slPrice, array.size(slPrice) - 1)) >= minSwingATR * atr
+    if accept
+        if array.size(slPrice) > 0
+            slTag := p > array.get(slPrice, array.size(slPrice) - 1) ? "HL" : "LL"
+        array.push(slPrice, p)
+        array.push(slBar, b)
+        while array.size(slPrice) > swingMem
+            array.shift(slPrice)
+            array.shift(slBar)
+        newSL    := true
+        curSL    := p
+        curSLBar := b
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 2 — MARKET STRUCTURE (HH/HL/LH/LL + BOS + CHOCH)
+//  The engine keeps ONE unbroken reference high and ONE unbroken reference low.
+//  A break of the reference high while the trend is bearish is a CHOCH, any
+//  other break in the direction of the trend is a BOS.
+// ══════════════════════════════════════════════════════════════════════════════
+var float msTop      = na
+var int   msTopBar   = na
+var bool  msTopBrk   = true
+var float msBot      = na
+var int   msBotBar   = na
+var bool  msBotBrk   = true
+var int   msTrend    = 0        //  1 bullish, -1 bearish, 0 undefined
+var int   msLastEvt  = 0        //  1 bullBOS, 2 bearBOS, 3 bullCHOCH, 4 bearCHOCH
+
+// Refresh the unbroken references with every freshly confirmed swing
+if newSH
+    msTop    := curSH
+    msTopBar := curSHBar
+    msTopBrk := false
+if newSL
+    msBot    := curSL
+    msBotBar := curSLBar
+    msBotBrk := false
+
+float brkUpSrc = msBreakSrc == "Close" ? close : high
+float brkDnSrc = msBreakSrc == "Close" ? close : low
+
+bool bosUp   = false
+bool bosDn   = false
+bool chochUp = false
+bool chochDn = false
+
+if barOK and not msTopBrk and not na(msTop) and brkUpSrc > msTop
+    if msTrend == -1
+        chochUp := true
+        msLastEvt := 3
+    else
+        bosUp := true
+        msLastEvt := 1
+    if msTrend != 1
+        evTrendFlip := true
+    msTrend  := 1
+    msTopBrk := true
+
+if barOK and not msBotBrk and not na(msBot) and brkDnSrc < msBot
+    if msTrend == 1
+        chochDn := true
+        msLastEvt := 4
+    else
+        bosDn := true
+        msLastEvt := 2
+    if msTrend != -1
+        evTrendFlip := true
+    msTrend  := -1
+    msBotBrk := true
+
+evBullBOS   := bosUp
+evBearBOS   := bosDn
+evBullCHOCH := chochUp
+evBearCHOCH := chochDn
+
+// ═══ CHART CLEANLINESS (spec §17) ═════════════════════════════════════════════
+// Drawing priority:  1 BOS/CHOCH · 2 Liquidity Sweep · 3 FVG · 4 Order Block
+//                    5 Major S/R · 6 Trend Lines · 7 Divergence · 8 Minor Swings
+// In clean mode a lower-priority label is skipped on a bar that already carries
+// a higher-priority event.  That is why the low-priority labels below are drawn
+// AFTER the structure engine has run: their suppression condition has to exist
+// before they are created.
+bool msEvent  = bosUp or bosDn or chochUp or chochDn
+bool cleanTop = cleanMode and msEvent
+
+// ── Structure drawings ────────────────────────────────────────────────────────
+if enableMS and ((bosUp and showBOS) or (chochUp and showCHOCH))
+    if showMSLine and not na(msTopBar)
+        regLn(line.new(math.max(msTopBar, bar_index - drawMaxBack), msTop, bar_index, msTop, color = bullCol, style = line.style_dashed, width = 1), maxSignalLn)
+    regLbl(label.new(bar_index, msTop + atr * (0.4 + 0.45 * lblStack()), chochUp ? "CHOCH ↑" : "BOS ↑", style = label.style_label_down, color = color.new(bullCol, 15), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+
+if enableMS and ((bosDn and showBOS) or (chochDn and showCHOCH))
+    if showMSLine and not na(msBotBar)
+        regLn(line.new(math.max(msBotBar, bar_index - drawMaxBack), msBot, bar_index, msBot, color = bearCol, style = line.style_dashed, width = 1), maxSignalLn)
+    regLbl(label.new(bar_index, msBot - atr * (0.4 + 0.45 * lblStack()), chochDn ? "CHOCH ↓" : "BOS ↓", style = label.style_label_up, color = color.new(bearCol, 15), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+
+// ── Priority 8: swing + HH/HL/LH/LL labels (drawn last, suppressed first) ─────
+if enableSwing and showSwingLb and showMinorSw and newSH and not cleanTop
+    regLbl(label.new(curSHBar, curSH, "SH", style = label.style_label_down, color = color.new(bearCol, 70), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+if enableSwing and showSwingLb and showMinorSw and newSL and not cleanTop
+    regLbl(label.new(curSLBar, curSL, "SL", style = label.style_label_up, color = color.new(bullCol, 70), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+if enableSwing and showSwingLb and showMajorSw and barOK and not na(phMajor) and not cleanTop
+    regLbl(label.new(bar_index - majorLen, phMajor, "SH", style = label.style_label_down, color = color.new(bearCol, 20), textcolor = txtCol, size = size.small), maxSignalLbl)
+if enableSwing and showSwingLb and showMajorSw and barOK and not na(plMajor) and not cleanTop
+    regLbl(label.new(bar_index - majorLen, plMajor, "SL", style = label.style_label_up, color = color.new(bullCol, 20), textcolor = txtCol, size = size.small), maxSignalLbl)
+if enableMS and showHHLL and newSH and shTag != "" and not cleanTop
+    regLbl(label.new(curSHBar, curSH, shTag, style = label.style_label_down, color = color.new(shTag == "HH" ? bullCol : bearCol, 55), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+if enableMS and showHHLL and newSL and slTag != "" and not cleanTop
+    regLbl(label.new(curSLBar, curSL, slTag, style = label.style_label_up, color = color.new(slTag == "HL" ? bullCol : bearCol, 55), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 3 — SUPPORT & RESISTANCE
+//  Confirmed swings are CLUSTERED, not drawn one by one: a new swing that falls
+//  within `srSens × ATR` of an existing level is merged into it (running average)
+//  and increases its test counter instead of creating a duplicate level.
+//  Drawing happens only on the last bar => at most srMaxLvl objects alive.
+// ══════════════════════════════════════════════════════════════════════════════
+var array<SRLvl> srArr     = array.new<SRLvl>()
+var array<line>  srLines   = array.new<line>()
+var array<box>   srBoxes   = array.new<box>()
+var array<label> srLabels  = array.new<label>()
+
+// register / merge one confirmed swing into the level list
+srFeed(float p, int b, float tol, int cap) =>
+    int hit = -1
+    if array.size(srArr) > 0
+        for i = 0 to array.size(srArr) - 1
+            SRLvl lv = array.get(srArr, i)
+            if math.abs(lv.price - p) <= tol
+                hit := i
+                break
+    if hit >= 0
+        SRLvl lv = array.get(srArr, hit)
+        // running average keeps the level anchored to the centre of the cluster
+        lv.price   := (lv.price * lv.tests + p) / float(lv.tests + 1)
+        lv.tests   := lv.tests + 1
+        lv.lastBar := b
+    else
+        array.push(srArr, SRLvl.new(price = p, tests = 1, lastBar = b, bornBar = b, strength = 1.0))
+    // prune: drop the weakest level once the cap is exceeded
+    while array.size(srArr) > cap
+        int worst = 0
+        float worstS = 1e18
+        for i = 0 to array.size(srArr) - 1
+            SRLvl lv = array.get(srArr, i)
+            if lv.strength < worstS
+                worstS := lv.strength
+                worst  := i
+        array.remove(srArr, worst)
+    array.size(srArr)
+
+if enableSR and newSH
+    srFeed(curSH, curSHBar, atr * srSens, srMaxLvl * 3)
+if enableSR and newSL
+    srFeed(curSL, curSLBar, atr * srSens, srMaxLvl * 3)
+
+// Re-test detection + strength refresh (bounded loop: srMaxLvl*3 iterations)
+if enableSR and barOK and array.size(srArr) > 0
+    float tol = atr * srSens
+    for i = 0 to array.size(srArr) - 1
+        SRLvl lv = array.get(srArr, i)
+        // a bar that trades into the band counts as a test, debounced by pivotLen
+        if low <= lv.price + tol and high >= lv.price - tol and bar_index - lv.lastBar > pivotLen
+            lv.tests   := lv.tests + 1
+            lv.lastBar := bar_index
+        // strength = tests, aged by how long ago the level was last respected
+        float ageFac = math.max(0.0, 1.0 - (bar_index - lv.lastBar) / 500.0)
+        lv.strength := lv.tests * (0.5 + ageFac)
+
+// ── S/R drawing (last bar only) ───────────────────────────────────────────────
+if barstate.islast
+    if array.size(srLines) > 0
+        for i = 0 to array.size(srLines) - 1
+            line.delete(array.get(srLines, i))
+        array.clear(srLines)
+    if array.size(srBoxes) > 0
+        for i = 0 to array.size(srBoxes) - 1
+            box.delete(array.get(srBoxes, i))
+        array.clear(srBoxes)
+    if array.size(srLabels) > 0
+        for i = 0 to array.size(srLabels) - 1
+            label.delete(array.get(srLabels, i))
+        array.clear(srLabels)
+    if enableSR and array.size(srArr) > 0
+        // keep only the strongest srMaxLvl levels that passed the test filter
+        int drawn = 0
+        float floorS = 0.0
+        // find the strength threshold of the srMaxLvl-th strongest level
+        array<float> strengths = array.new<float>()
+        for i = 0 to array.size(srArr) - 1
+            SRLvl lv = array.get(srArr, i)
+            if lv.tests >= srMinTests
+                array.push(strengths, lv.strength)
+        if array.size(strengths) > 0
+            array.sort(strengths, order.descending)
+            int idx = int(math.min(srMaxLvl, array.size(strengths))) - 1
+            floorS := array.get(strengths, idx)
+        for i = 0 to array.size(srArr) - 1
+            SRLvl lv = array.get(srArr, i)
+            if lv.tests >= srMinTests and lv.strength >= floorS and drawn < srMaxLvl
+                drawn += 1
+                bool isSup = lv.price < close
+                color c = isSup ? bullCol : bearCol
+                float tol = atr * srSens * 0.5
+                int x2 = srExtend ? bar_index + 20 : bar_index
+                // A level can be many thousands of bars old.  Pine rejects a
+                // bar_index coordinate too far from the current bar, so the left
+                // edge is clamped; the level's PRICE is what matters, not where
+                // it was first printed.
+                int x1 = math.max(lv.bornBar, bar_index - drawMaxBack)
+                if srStyle == "Zones"
+                    array.push(srBoxes, box.new(x1, lv.price + tol, x2, lv.price - tol, border_color = color.new(c, 40), bgcolor = color.new(c, 88), border_width = 1))
+                else
+                    array.push(srLines, line.new(x1, lv.price, x2, lv.price, color = color.new(c, 20), style = line.style_solid, width = 2))
+                if srShowInfo
+                    string t = (isSup ? "S " : "R ") + str.tostring(lv.price, format.mintick) + "  ×" + str.tostring(lv.tests) + "  ⚡" + str.tostring(lv.strength, "#.#")
+                    array.push(srLabels, label.new(x2, lv.price, t, style = label.style_label_left, color = color.new(c, 75), textcolor = txtCol, size = size.tiny))
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 4 — AUTOMATIC TREND LINES
+//  Brute force over the last `tlLookSw` CONFIRMED swings only.  Both anchors are
+//  in the past (never a future point).  A candidate is rejected when any swing
+//  after the first anchor closes through it, so the surviving line is the one
+//  price actually respected.
+// ══════════════════════════════════════════════════════════════════════════════
+var array<TrLine> tlArr = array.new<TrLine>()
+
+// results are returned through a mutable array (`out`) instead of a tuple,
+// because tuple destructuring is not permitted inside a local block.
+// out[0]=p1  out[1]=b1  out[2]=p2  out[3]=b2  out[4]=touches  out[5]=found
+findTL(array<float> ps, array<int> bs, bool bull, float tol, int minTouch, int lookN, int minBars, array<float> out) =>
+    array.set(out, 5, 0.0)
+    int n = array.size(ps)
+    float rp1 = na
+    int   rb1 = 0
+    float rp2 = na
+    int   rb2 = 0
+    int   rt  = 0
+    if n >= 2
+        int start = int(math.max(0, n - lookN))
+        for i = start to n - 2
+            for j = i + 1 to n - 1
+                float p1 = array.get(ps, i)
+                int   b1 = array.get(bs, i)
+                float p2 = array.get(ps, j)
+                int   b2 = array.get(bs, j)
+                // bullish line must rise, bearish line must fall, and be long enough
+                bool okDir = bull ? p2 > p1 : p2 < p1
+                if okDir and (b2 - b1) >= minBars
+                    int  tch   = 0
+                    bool valid = true
+                    for k = start to n - 1
+                        int bk = array.get(bs, k)
+                        if bk >= b1
+                            float pk = array.get(ps, k)
+                            float yv = lineY(p1, b1, p2, b2, bk)
+                            float d  = pk - yv
+                            if math.abs(d) <= tol
+                                tch := tch + 1
+                            else if bull and d < -tol
+                                valid := false      // a swing low pierced the support line
+                            else if not bull and d > tol
+                                valid := false      // a swing high pierced the resistance line
+                    // >= keeps the most recent of two equally good candidates
+                    if valid and tch >= minTouch and tch >= rt
+                        rt  := tch
+                        rp1 := p1
+                        rb1 := b1
+                        rp2 := p2
+                        rb2 := b2
+    if not na(rp1)
+        array.set(out, 0, rp1)
+        array.set(out, 1, float(rb1))
+        array.set(out, 2, rp2)
+        array.set(out, 3, float(rb2))
+        array.set(out, 4, float(rt))
+        array.set(out, 5, 1.0)
+    array.get(out, 5)
+
+tlPush(TrLine t, int cap) =>
+    array.push(tlArr, t)
+    while array.size(tlArr) > cap
+        TrLine old = array.shift(tlArr)
+        delLn(old.ln)
+    array.size(tlArr)
+
+// drop the previous (still unbroken) line of the same direction before rebuilding
+tlDropActive(bool bull) =>
+    if array.size(tlArr) > 0
+        for i = array.size(tlArr) - 1 to 0
+            TrLine t = array.get(tlArr, i)
+            if t.bull == bull and not t.broken
+                delLn(t.ln)
+                array.remove(tlArr, i)
+    array.size(tlArr)
+
+var array<float> tlOut = array.new<float>(6, 0.0)
+
+if enableTL and newSL and barOK
+    if findTL(slPrice, slBar, true, atr * tlTolATR, tlMinTouch, tlLookSw, tlMinBars, tlOut) > 0.5
+        tlDropActive(true)
+        int   b1 = int(array.get(tlOut, 1))
+        int   b2 = int(array.get(tlOut, 3))
+        float p1 = array.get(tlOut, 0)
+        float p2 = array.get(tlOut, 2)
+        // clamp the anchor the same way; lineY() keeps the slope identical
+        int   dx1 = math.max(b1, bar_index - drawMaxBack)
+        float dy1 = lineY(p1, b1, p2, b2, dx1)
+        line ln = line.new(dx1, dy1, b2, p2, extend = tlExtend ? extend.right : extend.none, color = color.new(bullCol, 20), style = line.style_solid, width = 2)
+        tlPush(TrLine.new(p1 = p1, b1 = b1, p2 = p2, b2 = b2, bull = true, touches = int(array.get(tlOut, 4)), broken = false, ln = ln), tlMax)
+
+if enableTL and newSH and barOK
+    if findTL(shPrice, shBar, false, atr * tlTolATR, tlMinTouch, tlLookSw, tlMinBars, tlOut) > 0.5
+        tlDropActive(false)
+        int   b1 = int(array.get(tlOut, 1))
+        int   b2 = int(array.get(tlOut, 3))
+        float p1 = array.get(tlOut, 0)
+        float p2 = array.get(tlOut, 2)
+        // clamp the anchor the same way; lineY() keeps the slope identical
+        int   dx1 = math.max(b1, bar_index - drawMaxBack)
+        float dy1 = lineY(p1, b1, p2, b2, dx1)
+        line ln = line.new(dx1, dy1, b2, p2, extend = tlExtend ? extend.right : extend.none, color = color.new(bearCol, 20), style = line.style_solid, width = 2)
+        tlPush(TrLine.new(p1 = p1, b1 = b1, p2 = p2, b2 = b2, bull = false, touches = int(array.get(tlOut, 4)), broken = false, ln = ln), tlMax)
+
+// ── Trend line break detection ────────────────────────────────────────────────
+if enableTL and barOK and array.size(tlArr) > 0
+    for i = 0 to array.size(tlArr) - 1
+        TrLine t = array.get(tlArr, i)
+        if not t.broken and bar_index > t.b2
+            float y = lineY(t.p1, t.b1, t.p2, t.b2, bar_index)
+            bool brk = t.bull ? close < y : close > y
+            if brk
+                t.broken := true
+                line.set_extend(t.ln, extend.none)
+                line.set_x2(t.ln, bar_index)
+                line.set_y2(t.ln, y)
+                line.set_style(t.ln, line.style_dotted)
+                line.set_color(t.ln, color.new(neutCol, 40))
+                if t.bull
+                    evTLBreakDn := true
+                else
+                    evTLBreakUp := true
+                if tlShowBrk and not cleanTop
+                    regLbl(label.new(bar_index, y + (t.bull ? -1 : 1) * atr * (0.4 + 0.45 * lblStack()), t.bull ? "TL Break ↓" : "TL Break ↑", style = t.bull ? label.style_label_up : label.style_label_down, color = color.new(t.bull ? bearCol : bullCol, 25), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 5 — LIQUIDITY (BSL / SSL POOLS + SWEEPS)
+//  A confirmed swing high is a Buy-Side Liquidity pool (stops of shorts sit
+//  above it), a confirmed swing low is a Sell-Side Liquidity pool.
+//  Sweep logic:
+//    Wick Sweep        -> the SAME candle pierces the level AND closes back inside.
+//    Close Confirmation-> price may close beyond the level; the sweep is only
+//                         validated when a close returns inside within N bars.
+//                         If it never returns, it was a real break, not a sweep.
+// ══════════════════════════════════════════════════════════════════════════════
+var array<LiqPool> liqBuy  = array.new<LiqPool>()
+var array<LiqPool> liqSell = array.new<LiqPool>()
+
+liqAdd(array<LiqPool> arr, float p, int b, bool buySide, int cap) =>
+    line ln = na
+    if liqShowLvl
+        ln := line.new(b, p, bar_index, p, extend = extend.right, color = color.new(buySide ? bearCol : bullCol, 55), style = line.style_dotted, width = 1)
+    array.push(arr, LiqPool.new(price = p, bornBar = b, buySide = buySide, taken = false, takenBar = 0, swept = false, ln = ln, lb = na))
+    while array.size(arr) > cap
+        LiqPool old = array.shift(arr)
+        delLn(old.ln)
+        delLbl(old.lb)
+    array.size(arr)
+
+if enableLiq and not liqUseMajor and newSH
+    liqAdd(liqBuy, curSH, curSHBar, true, liqMax)
+if enableLiq and not liqUseMajor and newSL
+    liqAdd(liqSell, curSL, curSLBar, false, liqMax)
+// major mode reads the major pivot stream directly (delay = majorLen bars)
+if enableLiq and liqUseMajor and barOK and not na(phMajor)
+    liqAdd(liqBuy, phMajor, bar_index - majorLen, true, liqMax)
+if enableLiq and liqUseMajor and barOK and not na(plMajor)
+    liqAdd(liqSell, plMajor, bar_index - majorLen, false, liqMax)
+
+// Buy-side sweeps
+if enableLiq and barOK and array.size(liqBuy) > 0
+    for i = array.size(liqBuy) - 1 to 0
+        LiqPool lp = array.get(liqBuy, i)
+        if not lp.swept
+            bool sweep = false
+            if liqMode == "Wick Sweep"
+                // pierce + close back below in one candle
+                sweep := high > lp.price and close < lp.price
+            else
+                // a CLOSE beyond the pool = liquidity taken (stricter than a wick)
+                if not lp.taken and close > lp.price
+                    lp.taken    := true
+                    lp.takenBar := bar_index
+                if lp.taken and close < lp.price and bar_index - lp.takenBar <= liqBackBars
+                    sweep := true
+                if lp.taken and bar_index - lp.takenBar > liqBackBars
+                    // never came back: this was a genuine break, retire the pool
+                    delLn(lp.ln)
+                    delLbl(lp.lb)
+                    array.remove(liqBuy, i)
+            if sweep
+                lp.swept := true
+                evBSLSweep := true
+                if not na(lp.ln)
+                    line.set_extend(lp.ln, extend.none)
+                    line.set_x2(lp.ln, bar_index)
+                    line.set_color(lp.ln, color.new(bearCol, 0))
+                    line.set_style(lp.ln, line.style_solid)
+                lp.lb := regLbl(label.new(bar_index, high + atr * (0.4 + 0.45 * lblStack()), "BSL SWEEP", style = label.style_label_down, color = color.new(bearCol, 10), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+
+// Sell-side sweeps
+if enableLiq and barOK and array.size(liqSell) > 0
+    for i = array.size(liqSell) - 1 to 0
+        LiqPool lp = array.get(liqSell, i)
+        if not lp.swept
+            bool sweep = false
+            if liqMode == "Wick Sweep"
+                sweep := low < lp.price and close > lp.price
+            else
+                if not lp.taken and close < lp.price
+                    lp.taken    := true
+                    lp.takenBar := bar_index
+                if lp.taken and close > lp.price and bar_index - lp.takenBar <= liqBackBars
+                    sweep := true
+                if lp.taken and bar_index - lp.takenBar > liqBackBars
+                    delLn(lp.ln)
+                    delLbl(lp.lb)
+                    array.remove(liqSell, i)
+            if sweep
+                lp.swept := true
+                evSSLSweep := true
+                if not na(lp.ln)
+                    line.set_extend(lp.ln, extend.none)
+                    line.set_x2(lp.ln, bar_index)
+                    line.set_color(lp.ln, color.new(bullCol, 0))
+                    line.set_style(lp.ln, line.style_solid)
+                lp.lb := regLbl(label.new(bar_index, low - atr * (0.4 + 0.45 * lblStack()), "SSL SWEEP", style = label.style_label_up, color = color.new(bullCol, 10), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 6 — FAIR VALUE GAP (3-candle imbalance)
+//  Bullish FVG : low[0] > high[2]  -> gap = high[2] .. low[0]
+//  Bearish FVG : high[0] < low[2]  -> gap = high[0] .. low[2]
+//  The middle candle must travel in the direction of the imbalance.
+//  States: 0 FRESH (untouched) · 1 PARTIAL (price inside) · 2 MITIGATED (filled)
+//  ►► The pattern needs the 3rd candle to close, so with "Confirm on bar close"
+//     an FVG is printed one bar after the imbalance actually happened.
+// ══════════════════════════════════════════════════════════════════════════════
+var array<FvgZone> fvgArr = array.new<FvgZone>()
+
+fvgStateTxt(int st) => st == 0 ? "FRESH" : st == 1 ? "PARTIAL" : "MITIGATED"
+
+fvgPush(FvgZone z, int cap) =>
+    array.push(fvgArr, z)
+    while array.size(fvgArr) > cap
+        FvgZone old = array.shift(fvgArr)
+        delBx(old.bx)
+        delLbl(old.lb)
+    array.size(fvgArr)
+
+float fvgSizeMin = fvgMinATR * atr
+bool rawBullFVG = low > high[2] and close[1] > open[1] and (low - high[2]) >= fvgSizeMin
+bool rawBearFVG = high < low[2] and close[1] < open[1] and (low[2] - high) >= fvgSizeMin
+
+if enableFVG and barOK and rawBullFVG
+    float t = low
+    float b = high[2]
+    box bx = box.new(bar_index - 2, t, bar_index, b, border_color = color.new(bullCol, 60), bgcolor = color.new(bullCol, 85), border_width = 1)
+    label lb = na
+    if fvgShowMit
+        lb := label.new(bar_index, b, "FVG FRESH", style = label.style_label_left, color = color.new(bullCol, 80), textcolor = txtCol, size = size.tiny)
+    fvgPush(FvgZone.new(top = t, bot = b, bornBar = bar_index, bull = true, state = 0, bx = bx, lb = lb), fvgCap)
+    evBullFVG := true
+
+if enableFVG and barOK and rawBearFVG
+    float t = low[2]
+    float b = high
+    box bx = box.new(bar_index - 2, t, bar_index, b, border_color = color.new(bearCol, 60), bgcolor = color.new(bearCol, 85), border_width = 1)
+    label lb = na
+    if fvgShowMit
+        lb := label.new(bar_index, t, "FVG FRESH", style = label.style_label_left, color = color.new(bearCol, 80), textcolor = txtCol, size = size.tiny)
+    fvgPush(FvgZone.new(top = t, bot = b, bornBar = bar_index, bull = false, state = 0, bx = bx, lb = lb), fvgCap)
+    evBearFVG := true
+
+// ── FVG maintenance: extension + mitigation tracking ──────────────────────────
+if enableFVG and array.size(fvgArr) > 0
+    float mitUp = fvgMitSrc == "Wick" ? low  : math.min(close, open)
+    float mitDn = fvgMitSrc == "Wick" ? high : math.max(close, open)
+    for i = array.size(fvgArr) - 1 to 0
+        FvgZone z = array.get(fvgArr, i)
+        // retire a zone whose left edge has drifted out of Pine's drawing range
+        if bar_index - z.bornBar > drawMaxBack
+            delBx(z.bx)
+            delLbl(z.lb)
+            array.remove(fvgArr, i)
+            continue
+        if fvgExtend and z.state < 2 and not na(z.bx)
+            box.set_right(z.bx, bar_index)
+            if not na(z.lb)
+                label.set_x(z.lb, bar_index)
+        if barOK and z.state < 2
+            int prevState = z.state
+            if z.bull
+                if mitUp <= z.bot
+                    z.state := 2
+                else if low <= z.top
+                    z.state := 1
+            else
+                if mitDn >= z.top
+                    z.state := 2
+                else if high >= z.bot
+                    z.state := 1
+            if z.state != prevState
+                color c = z.bull ? bullCol : bearCol
+                if z.state == 2
+                    if fvgOnMit == "Delete"
+                        delBx(z.bx)
+                        delLbl(z.lb)
+                        array.remove(fvgArr, i)
+                    else if fvgOnMit == "Hide"
+                        delBx(z.bx)
+                        delLbl(z.lb)
+                        z.bx := na
+                        z.lb := na
+                    else
+                        box.set_bgcolor(z.bx, color.new(neutCol, 92))
+                        box.set_border_color(z.bx, color.new(neutCol, 70))
+                        if not na(z.lb)
+                            label.set_text(z.lb, "FVG MITIGATED")
+                            label.set_color(z.lb, color.new(neutCol, 80))
+                else
+                    if not na(z.bx)
+                        box.set_bgcolor(z.bx, color.new(c, 92))
+                    if not na(z.lb) and fvgShowMit
+                        label.set_text(z.lb, "FVG " + fvgStateTxt(z.state))
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 7 — ORDER BLOCKS
+//  An OB is the LAST opposite-colour candle before a displacement leg.  Candle
+//  colour alone is never enough, so a block is only created when one of these
+//  is true:
+//      • the leg broke structure (BOS / CHOCH)  -> highest priority, +40 score
+//      • the leg produced a displacement candle (body > obDispATR × ATR)
+//  STRENGTH SCORE = displacement + volume + BOS bonus.  Freshness and distance
+//  are applied later as a decay when the weakest block has to be evicted.
+//  States: 0 FRESH · 1 TESTED · 2 MITIGATED (50% filled) · 3 INVALIDATED
+// ══════════════════════════════════════════════════════════════════════════════
+var array<ObZone> obArr = array.new<ObZone>()
+volAvg = ta.sma(volume, 20)
+
+obStateTxt(int st) => st == 0 ? "FRESH" : st == 1 ? "TESTED" : st == 2 ? "MITIGATED" : "INVALID"
+
+// effective score used only for eviction: the score decays with age and with
+// distance from the current price, exactly as required by the spec.
+obEff(ObZone o, float px, float a) =>
+    float mid  = (o.top + o.bot) * 0.5
+    float dist = a > 0 ? math.abs(px - mid) / a : 0.0
+    o.score - math.min((bar_index - o.bornBar) * 0.10, 30.0) - math.min(dist * 2.0, 20.0)
+
+obPush(ObZone o, int cap, float px, float a) =>
+    array.push(obArr, o)
+    while array.size(obArr) > cap
+        int worst = 0
+        float worstS = 1e18
+        for i = 0 to array.size(obArr) - 1
+            float e = obEff(array.get(obArr, i), px, a)
+            if e < worstS
+                worstS := e
+                worst  := i
+        ObZone old = array.remove(obArr, worst)
+        delBx(old.bx)
+        delLbl(old.lb)
+    array.size(obArr)
+
+// does a candidate zone already exist?  prevents duplicate / overlapping blocks
+obDuplicate(float t, float b, bool bull) =>
+    bool dup = false
+    if array.size(obArr) > 0
+        for i = 0 to array.size(obArr) - 1
+            ObZone o = array.get(obArr, i)
+            if o.bull == bull and o.top >= b and t >= o.bot
+                dup := true
+                break
+    dup
+
+// displacement of the current leg, measured on the signal bar
+float bodySize = math.abs(close - open)
+bool  dispBull = close > open and bodySize >= obDispATR * atr
+bool  dispBear = close < open and bodySize >= obDispATR * atr
+float volRatio = na(volume) or na(volAvg) or volAvg <= 0 ? 1.0 : volume / volAvg
+
+// A bullish OB is created when structure broke up, or on a bullish displacement
+bool obBullTrigger = (bosUp or chochUp) or (dispBull and not obOnlyBOS)
+bool obBearTrigger = (bosDn or chochDn) or (dispBear and not obOnlyBOS)
+
+if enableOB and barOK and obBullTrigger
+    // walk back to the last bearish candle that started the leg
+    int idx = -1
+    for i = 0 to obLookback - 1
+        if close[i] < open[i]
+            idx := i
+            break
+    if idx >= 0
+        float t = obUseBody ? math.max(open[idx], close[idx]) : high[idx]
+        float b = obUseBody ? math.min(open[idx], close[idx]) : low[idx]
+        if not obDuplicate(t, b, true)
+            bool fromBOS = bosUp or chochUp
+            float sc = math.min(bodySize / math.max(atr, syminfo.mintick), 3.0) * 20.0 + math.min(volRatio, 3.0) * 10.0 + (fromBOS ? 40.0 : 0.0) + (chochUp ? 10.0 : 0.0)
+            box bx = box.new(bar_index - idx, t, bar_index, b, border_color = color.new(bullCol, 35), bgcolor = color.new(bullCol, 80), border_width = 1)
+            label lb = na
+            if obShowStr
+                lb := label.new(bar_index, t, "OB " + str.tostring(int(math.round(sc))), style = label.style_label_left, color = color.new(bullCol, 70), textcolor = txtCol, size = size.tiny)
+            obPush(ObZone.new(top = t, bot = b, bornBar = bar_index - idx, bull = true, state = 0, score = sc, fromBOS = fromBOS, bx = bx, lb = lb), obCap, close, atr)
+            evBullOB := true
+
+if enableOB and barOK and obBearTrigger
+    int idx = -1
+    for i = 0 to obLookback - 1
+        if close[i] > open[i]
+            idx := i
+            break
+    if idx >= 0
+        float t = obUseBody ? math.max(open[idx], close[idx]) : high[idx]
+        float b = obUseBody ? math.min(open[idx], close[idx]) : low[idx]
+        if not obDuplicate(t, b, false)
+            bool fromBOS = bosDn or chochDn
+            float sc = math.min(bodySize / math.max(atr, syminfo.mintick), 3.0) * 20.0 + math.min(volRatio, 3.0) * 10.0 + (fromBOS ? 40.0 : 0.0) + (chochDn ? 10.0 : 0.0)
+            box bx = box.new(bar_index - idx, t, bar_index, b, border_color = color.new(bearCol, 35), bgcolor = color.new(bearCol, 80), border_width = 1)
+            label lb = na
+            if obShowStr
+                lb := label.new(bar_index, b, "OB " + str.tostring(int(math.round(sc))), style = label.style_label_left, color = color.new(bearCol, 70), textcolor = txtCol, size = size.tiny)
+            obPush(ObZone.new(top = t, bot = b, bornBar = bar_index - idx, bull = false, state = 0, score = sc, fromBOS = fromBOS, bx = bx, lb = lb), obCap, close, atr)
+            evBearOB := true
+
+// ── OB maintenance: extension, test / mitigation / invalidation ───────────────
+if enableOB and array.size(obArr) > 0
+    for i = array.size(obArr) - 1 to 0
+        ObZone o = array.get(obArr, i)
+        if bar_index - o.bornBar > drawMaxBack
+            delBx(o.bx)
+            delLbl(o.lb)
+            array.remove(obArr, i)
+            continue
+        if obExtend and o.state < 3 and not na(o.bx)
+            box.set_right(o.bx, bar_index)
+            if not na(o.lb)
+                label.set_x(o.lb, bar_index)
+        if barOK and o.state < 3
+            int prev = o.state
+            float mid = (o.top + o.bot) * 0.5
+            if o.bull
+                if close < o.bot
+                    o.state := 3                       // closed below the block
+                else if low <= mid
+                    o.state := 2                       // price ate 50% of it
+                else if low <= o.top
+                    o.state := o.state < 1 ? 1 : o.state   // first touch
+            else
+                if close > o.top
+                    o.state := 3
+                else if high >= mid
+                    o.state := 2
+                else if high >= o.bot
+                    o.state := o.state < 1 ? 1 : o.state
+            if o.state != prev
+                if o.state == 3 and obDelInval
+                    delBx(o.bx)
+                    delLbl(o.lb)
+                    array.remove(obArr, i)
+                else
+                    color c = o.state >= 2 ? neutCol : (o.bull ? bullCol : bearCol)
+                    if not na(o.bx)
+                        box.set_bgcolor(o.bx, color.new(c, 88))
+                        box.set_border_color(o.bx, color.new(c, 50))
+                    if not na(o.lb) and obShowStr
+                        label.set_text(o.lb, "OB " + str.tostring(int(math.round(o.score))) + " " + obStateTxt(o.state))
+                        label.set_color(o.lb, color.new(c, 70))
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 8 — DIVERGENCE (RSI, regular + hidden)
+//  Both the price point and the oscillator point are PIVOTS, so they are only
+//  known `divLb` bars after they happened.
+//  ►► NATURAL DELAY: every divergence line is drawn divLb bars after the second
+//     pivot formed.  No future point is ever used — the line is drawn between
+//     two pivots that both already exist.
+// ══════════════════════════════════════════════════════════════════════════════
+rsiVal = ta.rsi(close, rsiLen)
+
+// ta.* must run on every bar -> these are all declared unconditionally
+plFound = not na(ta.pivotlow(rsiVal,  divLb, divLb))
+phFound = not na(ta.pivothigh(rsiVal, divLb, divLb))
+
+// previous oscillator pivot and the matching price / bar of that pivot
+rsiPLprev = ta.valuewhen(plFound, rsiVal[divLb], 1)
+lowPLprev = ta.valuewhen(plFound, low[divLb],    1)
+barPLprev = ta.valuewhen(plFound, bar_index[divLb], 1)
+rsiPHprev = ta.valuewhen(phFound, rsiVal[divLb], 1)
+highPHprev = ta.valuewhen(phFound, high[divLb],  1)
+barPHprev = ta.valuewhen(phFound, bar_index[divLb], 1)
+
+// distance filter between the two pivots
+barsSincePL = nz(ta.barssince(plFound[1]), 10000)
+barsSincePH = nz(ta.barssince(phFound[1]), 10000)
+inRangePL = barsSincePL >= divMinBars and barsSincePL <= divMaxBars
+inRangePH = barsSincePH >= divMinBars and barsSincePH <= divMaxBars
+
+float rsiNow  = rsiVal[divLb]
+float lowNow  = low[divLb]
+float highNow = high[divLb]
+int   barNow  = bar_index - divLb
+
+bool regBull = enableDiv and divRegular and plFound and inRangePL and not na(rsiPLprev) and lowNow < lowPLprev  and rsiNow > rsiPLprev
+bool hidBull = enableDiv and divHidden  and plFound and inRangePL and not na(rsiPLprev) and lowNow > lowPLprev  and rsiNow < rsiPLprev
+bool regBear = enableDiv and divRegular and phFound and inRangePH and not na(rsiPHprev) and highNow > highPHprev and rsiNow < rsiPHprev
+bool hidBear = enableDiv and divHidden  and phFound and inRangePH and not na(rsiPHprev) and highNow < highPHprev and rsiNow > rsiPHprev
+
+divDraw(int b1, float p1, int b2, float p2, string txt, color c, bool up) =>
+    regLn(line.new(b1, p1, b2, p2, color = color.new(c, 10), style = line.style_solid, width = 1), maxSignalLn)
+    regLbl(label.new(b2, p2, txt, style = up ? label.style_label_up : label.style_label_down, color = color.new(c, 30), textcolor = txtCol, size = size.tiny), maxSignalLbl)
+    txt
+
+// priority 7: a divergence label yields to structure events and sweeps
+bool cleanDiv = cleanMode and (msEvent or evBSLSweep or evSSLSweep)
+// NOTE: clean mode hides the DRAWING only — the event flag still fires, so
+// alerts and the confluence engine are never affected by a cosmetic setting.
+if barOK and regBull
+    evBullDiv := true
+    if not cleanDiv
+        divDraw(int(barPLprev), lowPLprev, barNow, lowNow, "REG BULL", bullCol, true)
+if barOK and hidBull
+    evBullDiv := true
+    if not cleanDiv
+        divDraw(int(barPLprev), lowPLprev, barNow, lowNow, "HID BULL", color.new(bullCol, 30), true)
+if barOK and regBear
+    evBearDiv := true
+    if not cleanDiv
+        divDraw(int(barPHprev), highPHprev, barNow, highNow, "REG BEAR", bearCol, false)
+if barOK and hidBear
+    evBearDiv := true
+    if not cleanDiv
+        divDraw(int(barPHprev), highPHprev, barNow, highNow, "HID BEAR", color.new(bearCol, 30), false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 9 — MULTI-TIMEFRAME ENGINE
+//  The SAME structure state machine as engine 2, re-executed inside
+//  request.security() on each requested timeframe.
+//  ►► barmerge.lookahead_off + (optionally) the value of the last CLOSED higher
+//     timeframe bar.  No future leak is possible: lookahead_on is never used.
+//  ►► When a requested timeframe is LOWER than the chart timeframe the request
+//     is redirected to the chart timeframe (cheap) and the row shows "n/a",
+//     because reading a lower timeframe would be meaningless here.
+// ══════════════════════════════════════════════════════════════════════════════
+// returns [trend, structure, lastEvent]
+//   trend     :  1 bullish   -1 bearish   0 neutral
+//   structure :  1 HH/HL     -1 LH/LL      0 mixed
+//   lastEvent :  1 bull BOS  2 bear BOS   3 bull CHOCH  4 bear CHOCH  0 none
+mtfState(simple int len, simple bool confirmed) =>
+    var float lastH = na
+    var float prevH = na
+    var float lastL = na
+    var float prevL = na
+    var float topRef = na
+    var bool  topBrk = true
+    var float botRef = na
+    var bool  botBrk = true
+    var int   tr  = 0
+    var int   evt = 0
+    var int   stc = 0
+    // snapshot of the PREVIOUS bar's state, taken before anything is updated
+    int prevTr  = tr
+    int prevEvt = evt
+    int prevStc = stc
+
+    float ph = ta.pivothigh(high, len, len)
+    float pl = ta.pivotlow(low, len, len)
+    if not na(ph)
+        prevH  := lastH
+        lastH  := ph
+        topRef := ph
+        topBrk := false
+    if not na(pl)
+        prevL  := lastL
+        lastL  := pl
+        botRef := pl
+        botBrk := false
+    if not topBrk and not na(topRef) and close > topRef
+        evt := tr == -1 ? 3 : 1
+        tr  := 1
+        topBrk := true
+    if not botBrk and not na(botRef) and close < botRef
+        evt := tr == 1 ? 4 : 2
+        tr  := -1
+        botBrk := true
+    if not na(lastH) and not na(prevH) and not na(lastL) and not na(prevL)
+        stc := lastH > prevH and lastL > prevL ? 1 : lastH < prevH and lastL < prevL ? -1 : 0
+    [confirmed ? prevTr : tr, confirmed ? prevStc : stc, confirmed ? prevEvt : evt]
+
+// The timeframe argument of request.security() must be a SIMPLE string.  The
+// input.timeframe() values are passed straight through for that reason — never
+// through a ternary, whose result Pine may qualify as `series string` and then
+// reject.  A timeframe below the chart timeframe is handled at DISPLAY time
+// (the row prints "n/a"), not by rewriting the request.
+chartSec = timeframe.in_seconds(timeframe.period)
+
+[trA, stA, evA] = request.security(syminfo.tickerid, tf1, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trB, stB, evB] = request.security(syminfo.tickerid, tf2, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trC, stC, evC] = request.security(syminfo.tickerid, tf3, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trD, stD, evD] = request.security(syminfo.tickerid, tf4, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trE, stE, evE] = request.security(syminfo.tickerid, tf5, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 11a — SIGNAL CONFLUENCE
+//  Counts how many independent engines agree inside a rolling window.
+//  This is NOT a buy/sell recommendation — it only states how much evidence
+//  currently points in one direction.
+// ══════════════════════════════════════════════════════════════════════════════
+var int cfBullSweep = -100000
+var int cfBullFvg   = -100000
+var int cfBullOb    = -100000
+var int cfBullStr   = -100000
+var int cfBullDiv   = -100000
+var int cfBearSweep = -100000
+var int cfBearFvg   = -100000
+var int cfBearOb    = -100000
+var int cfBearStr   = -100000
+var int cfBearDiv   = -100000
+
+// a sell-side sweep is a BULLISH event (liquidity taken below, price rejects up)
+if evSSLSweep
+    cfBullSweep := bar_index
+if evBSLSweep
+    cfBearSweep := bar_index
+if evBullFVG
+    cfBullFvg := bar_index
+if evBearFVG
+    cfBearFvg := bar_index
+if evBullOB
+    cfBullOb := bar_index
+if evBearOB
+    cfBearOb := bar_index
+if evBullBOS or evBullCHOCH
+    cfBullStr := bar_index
+if evBearBOS or evBearCHOCH
+    cfBearStr := bar_index
+if evBullDiv
+    cfBullDiv := bar_index
+if evBearDiv
+    cfBearDiv := bar_index
+
+fresh(int b, int w) => bar_index - b <= w
+
+int bullScore = (fresh(cfBullSweep, confWindow) ? 1 : 0) + (fresh(cfBullFvg, confWindow) ? 1 : 0) + (fresh(cfBullOb, confWindow) ? 1 : 0) + (fresh(cfBullStr, confWindow) ? 1 : 0) + (fresh(cfBullDiv, confWindow) ? 1 : 0)
+int bearScore = (fresh(cfBearSweep, confWindow) ? 1 : 0) + (fresh(cfBearFvg, confWindow) ? 1 : 0) + (fresh(cfBearOb, confWindow) ? 1 : 0) + (fresh(cfBearStr, confWindow) ? 1 : 0) + (fresh(cfBearDiv, confWindow) ? 1 : 0)
+
+var int lastBullConf = 0
+var int lastBearConf = 0
+if enableConf and barOK and bullScore >= confMin and bullScore > lastBullConf
+    regLbl(label.new(bar_index, low - atr * (0.9 + 0.45 * lblStack()), "Bullish Confluence " + str.tostring(bullScore) + "/5", style = label.style_label_up, color = color.new(bullCol, 5), textcolor = txtCol, size = size.small), maxSignalLbl)
+    evBullConf := true
+if enableConf and barOK and bearScore >= confMin and bearScore > lastBearConf
+    regLbl(label.new(bar_index, high + atr * (0.9 + 0.45 * lblStack()), "Bearish Confluence " + str.tostring(bearScore) + "/5", style = label.style_label_down, color = color.new(bearCol, 5), textcolor = txtCol, size = size.small), maxSignalLbl)
+    evBearConf := true
+if barOK
+    lastBullConf := bullScore
+    lastBearConf := bearScore
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MTF TREND TABLE  (built only on the last bar — see PERFORMANCE)
+// ══════════════════════════════════════════════════════════════════════════════
+trendTxt(int t) => t == 1 ? "Bullish" : t == -1 ? "Bearish" : "Neutral"
+structTxt(int s) => s == 1 ? "HH/HL" : s == -1 ? "LH/LL" : "—"
+eventTxt(int e) => e == 1 ? "BOS ↑" : e == 2 ? "BOS ↓" : e == 3 ? "CHOCH ↑" : e == 4 ? "CHOCH ↓" : "—"
+dirCol(int v) => v == 1 ? bullCol : v == -1 ? bearCol : neutCol
+
+// "240" -> "4H", "15" -> "15M" ... so the table reads the way a trader speaks
+tfLabel(simple string tf) =>
+    int sec = timeframe.in_seconds(tf)
+    string r = tf
+    if sec < 60
+        r := str.tostring(sec) + "S"
+    else if sec < 3600
+        r := str.tostring(sec / 60) + "M"
+    else if sec < 86400
+        r := str.tostring(sec / 3600) + "H"
+    else if sec < 604800
+        r := str.tostring(sec / 86400) + "D"
+    r
+
+tblPos = tblPosStr == "Top Right" ? position.top_right : tblPosStr == "Top Left" ? position.top_left : tblPosStr == "Bottom Right" ? position.bottom_right : tblPosStr == "Bottom Left" ? position.bottom_left : position.middle_right
+tblTxtSize = tblSize == "Tiny" ? size.tiny : tblSize == "Normal" ? size.normal : size.small
+
+int nCols = 1 + (mtfShowTr ? 1 : 0) + (mtfShowSt ? 1 : 0) + (mtfShowEv ? 1 : 0)
+var table mtfTbl = na
+
+if showTable and barstate.islast
+    if na(mtfTbl)
+        mtfTbl := table.new(position = tblPos, columns = nCols, rows = 6, bgcolor = color.new(#1e222d, 10), frame_color = color.new(neutCol, 40), frame_width = 1, border_color = color.new(neutCol, 70), border_width = 1)
+    array<string> tfNames = array.from(tfLabel(tf1), tfLabel(tf2), tfLabel(tf3), tfLabel(tf4), tfLabel(tf5))
+    array<int>    trs     = array.from(int(trA), int(trB), int(trC), int(trD), int(trE))
+    array<int>    sts     = array.from(int(stA), int(stB), int(stC), int(stD), int(stE))
+    array<int>    evs     = array.from(int(evA), int(evB), int(evC), int(evD), int(evE))
+    array<bool>   lows    = array.from(timeframe.in_seconds(tf1) < chartSec, timeframe.in_seconds(tf2) < chartSec, timeframe.in_seconds(tf3) < chartSec, timeframe.in_seconds(tf4) < chartSec, timeframe.in_seconds(tf5) < chartSec)
+    // header
+    int hc = 0
+    table.cell(mtfTbl, hc, 0, "TIMEFRAME", text_color = txtCol, text_size = tblTxtSize, bgcolor = color.new(neutCol, 60))
+    hc += 1
+    if mtfShowTr
+        table.cell(mtfTbl, hc, 0, "TREND", text_color = txtCol, text_size = tblTxtSize, bgcolor = color.new(neutCol, 60))
+        hc += 1
+    if mtfShowSt
+        table.cell(mtfTbl, hc, 0, "STRUCTURE", text_color = txtCol, text_size = tblTxtSize, bgcolor = color.new(neutCol, 60))
+        hc += 1
+    if mtfShowEv
+        table.cell(mtfTbl, hc, 0, "BOS/CHOCH", text_color = txtCol, text_size = tblTxtSize, bgcolor = color.new(neutCol, 60))
+        hc += 1
+    // rows
+    for r = 0 to 4
+        int    c  = 0
+        bool   lo = array.get(lows, r)
+        int    tv = array.get(trs, r)
+        int    sv = array.get(sts, r)
+        int    ev = array.get(evs, r)
+        color  tc = lo ? neutCol : dirCol(tv)
+        table.cell(mtfTbl, c, r + 1, array.get(tfNames, r), text_color = txtCol, text_size = tblTxtSize)
+        c += 1
+        if mtfShowTr
+            table.cell(mtfTbl, c, r + 1, lo ? "n/a" : trendTxt(tv), text_color = tc, text_size = tblTxtSize)
+            c += 1
+        if mtfShowSt
+            table.cell(mtfTbl, c, r + 1, lo ? "n/a" : structTxt(sv), text_color = lo ? neutCol : dirCol(sv), text_size = tblTxtSize)
+            c += 1
+        if mtfShowEv
+            table.cell(mtfTbl, c, r + 1, lo ? "n/a" : eventTxt(ev), text_color = lo ? neutCol : dirCol(ev == 1 or ev == 3 ? 1 : ev == 2 or ev == 4 ? -1 : 0), text_size = tblTxtSize)
+            c += 1
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ENGINE 11 — ALERT ENGINE
+//  alertcondition() is compiled for every event regardless of the on/off
+//  switches; the underlying flag is simply false when an engine is disabled.
+// ══════════════════════════════════════════════════════════════════════════════
+alertcondition(evBullBOS,   "Bullish BOS",        "SMC MTF: Bullish BOS on {{ticker}} {{interval}}")
+alertcondition(evBearBOS,   "Bearish BOS",        "SMC MTF: Bearish BOS on {{ticker}} {{interval}}")
+alertcondition(evBullCHOCH, "Bullish CHOCH",      "SMC MTF: Bullish CHOCH on {{ticker}} {{interval}}")
+alertcondition(evBearCHOCH, "Bearish CHOCH",      "SMC MTF: Bearish CHOCH on {{ticker}} {{interval}}")
+alertcondition(evBSLSweep,  "BSL Sweep",          "SMC MTF: Buy-side liquidity swept on {{ticker}} {{interval}}")
+alertcondition(evSSLSweep,  "SSL Sweep",          "SMC MTF: Sell-side liquidity swept on {{ticker}} {{interval}}")
+alertcondition(evBullFVG,   "Bullish FVG",        "SMC MTF: Bullish FVG formed on {{ticker}} {{interval}}")
+alertcondition(evBearFVG,   "Bearish FVG",        "SMC MTF: Bearish FVG formed on {{ticker}} {{interval}}")
+alertcondition(evBullOB,    "Bullish OB",         "SMC MTF: Bullish Order Block formed on {{ticker}} {{interval}}")
+alertcondition(evBearOB,    "Bearish OB",         "SMC MTF: Bearish Order Block formed on {{ticker}} {{interval}}")
+alertcondition(evBullDiv,   "Bullish Divergence", "SMC MTF: Bullish RSI divergence on {{ticker}} {{interval}}")
+alertcondition(evBearDiv,   "Bearish Divergence", "SMC MTF: Bearish RSI divergence on {{ticker}} {{interval}}")
+alertcondition(evBullConf,  "Bullish Confluence", "SMC MTF: Bullish confluence reached on {{ticker}} {{interval}}")
+alertcondition(evBearConf,  "Bearish Confluence", "SMC MTF: Bearish confluence reached on {{ticker}} {{interval}}")
+alertcondition(evTrendFlip, "Trend Change",       "SMC MTF: Market structure trend changed on {{ticker}} {{interval}}")
+alertcondition(evTLBreakUp, "Trend Line Break Up",   "SMC MTF: Bearish trend line broken upward on {{ticker}} {{interval}}")
+alertcondition(evTLBreakDn, "Trend Line Break Down", "SMC MTF: Bullish trend line broken downward on {{ticker}} {{interval}}")
+
+// Invisible plots — they expose the engine state to the Data Window, to other
+// scripts and to alert() placeholders without adding anything to the chart.
+plot(msTrend,   "Structure Trend (1/-1/0)", display = display.data_window)
+plot(msLastEvt, "Last Event (1=BOS↑ 2=BOS↓ 3=CHOCH↑ 4=CHOCH↓)", display = display.data_window)
+plot(bullScore, "Bullish Confluence",       display = display.data_window)
+plot(bearScore, "Bearish Confluence",       display = display.data_window)
+plot(rsiVal,    "RSI",                      display = display.data_window)
