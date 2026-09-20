@@ -1137,19 +1137,18 @@ mtfState(simple int len, simple bool confirmed) =>
         stc := lastH > prevH and lastL > prevL ? 1 : lastH < prevH and lastL < prevL ? -1 : 0
     [confirmed ? prevTr : tr, confirmed ? prevStc : stc, confirmed ? prevEvt : evt]
 
-// a requested timeframe below the chart timeframe is replaced by the chart one
+// The timeframe argument of request.security() must be a SIMPLE string.  The
+// input.timeframe() values are passed straight through for that reason — never
+// through a ternary, whose result Pine may qualify as `series string` and then
+// reject.  A timeframe below the chart timeframe is handled at DISPLAY time
+// (the row prints "n/a"), not by rewriting the request.
 chartSec = timeframe.in_seconds(timeframe.period)
-tfA = timeframe.in_seconds(tf1) < chartSec ? timeframe.period : tf1
-tfB = timeframe.in_seconds(tf2) < chartSec ? timeframe.period : tf2
-tfC = timeframe.in_seconds(tf3) < chartSec ? timeframe.period : tf3
-tfD = timeframe.in_seconds(tf4) < chartSec ? timeframe.period : tf4
-tfE = timeframe.in_seconds(tf5) < chartSec ? timeframe.period : tf5
 
-[trA, stA, evA] = request.security(syminfo.tickerid, tfA, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
-[trB, stB, evB] = request.security(syminfo.tickerid, tfB, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
-[trC, stC, evC] = request.security(syminfo.tickerid, tfC, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
-[trD, stD, evD] = request.security(syminfo.tickerid, tfD, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
-[trE, stE, evE] = request.security(syminfo.tickerid, tfE, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trA, stA, evA] = request.security(syminfo.tickerid, tf1, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trB, stB, evB] = request.security(syminfo.tickerid, tf2, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trC, stC, evC] = request.security(syminfo.tickerid, tf3, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trD, stD, evD] = request.security(syminfo.tickerid, tf4, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
+[trE, stE, evE] = request.security(syminfo.tickerid, tf5, mtfState(mtfPivot, mtfConfirm), lookahead = barmerge.lookahead_off)
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  ENGINE 11a — SIGNAL CONFLUENCE
