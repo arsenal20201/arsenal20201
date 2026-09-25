@@ -137,3 +137,12 @@ MQL5/
     HighWinRateEA.mq5   # the Expert Advisor
 README.md               # this file
 ```
+
+---
+
+## EA RoboFibo v11.2 (MQL5 port)
+
+`MQL5/Experts/EA_RoboFibo_v11.2.mq5` is a port of the MQL4 source in `MQL4/Experts/`.
+For the strategy analysis, the list of fixed bugs and suggested improvements, see
+[`docs/RoboFibo_Strategy_Analysis.md`](docs/RoboFibo_Strategy_Analysis.md).
+It needs a **hedging** account.
